@@ -152,18 +152,19 @@ function PlaybackQueue:_getNextPosition(page_num, chunk_index)
     if chunk_index < total_chunks then
         return page_num, chunk_index + 1
     else
-        -- Hết trang hiện tại, kiểm tra trang tiếp theo
+        -- Hết trang hiện tại, duyệt các trang tiếp theo (bỏ qua các trang trống/hình ảnh)
         local total_pages = 999999
         if self.document and type(self.document.getPageCount) == "function" then
             total_pages = self.document:getPageCount() or total_pages
         end
 
         local next_page = page_num + 1
-        if next_page <= total_pages then
+        while next_page <= total_pages do
             local next_chunks = self:_getPageChunks(next_page)
             if #next_chunks > 0 then
                 return next_page, 1
             end
+            next_page = next_page + 1
         end
         return nil, nil
     end
@@ -175,12 +176,13 @@ function PlaybackQueue:_getPrevPosition(page_num, chunk_index)
     if chunk_index > 1 then
         return page_num, chunk_index - 1
     else
-        if page_num > 1 then
-            local prev_page = page_num - 1
+        local prev_page = page_num - 1
+        while prev_page >= 1 do
             local prev_chunks = self:_getPageChunks(prev_page)
             if #prev_chunks > 0 then
                 return prev_page, #prev_chunks
             end
+            prev_page = prev_page - 1
         end
         return nil, nil
     end
@@ -249,24 +251,32 @@ function PlaybackQueue:_fetchSlot(offset)
             return
         end
 
-        local current_slot = this.slots[offset]
-        if not current_slot or current_slot ~= slot then
+        -- Kiểm tra xem slot này còn tồn tại trong window không (có thể đã được thăng hạng từ slot 1/2 lên slot 0)
+        local slot_current_offset = nil
+        for i = 0, 2 do
+            if this.slots[i] == slot then
+                slot_current_offset = i
+                break
+            end
+        end
+
+        if not slot_current_offset then
             return
         end
 
-        current_slot.cancel_fn = nil
+        slot.cancel_fn = nil
 
         if success then
-            current_slot.status = "READY"
-            current_slot.wav_path = result
+            slot.status = "READY"
+            slot.wav_path = result
 
-            -- Nếu đây là Slot N (offset == 0) và đang ở trạng thái PREFETCHING -> Kích hoạt phát ngay
-            if offset == 0 and this.state == PlaybackQueue.STATE_PREFETCHING then
+            -- Nếu slot hiện đang ở vị trí Slot N (offset 0) và FSM đang chờ PREFETCHING -> Kích hoạt phát ngay
+            if slot_current_offset == 0 and this.state == PlaybackQueue.STATE_PREFETCHING then
                 this:_playSlot(0)
             end
         else
-            current_slot.status = "ERROR"
-            if offset == 0 and this.state == PlaybackQueue.STATE_PREFETCHING then
+            slot.status = "ERROR"
+            if slot_current_offset == 0 and this.state == PlaybackQueue.STATE_PREFETCHING then
                 this:_setState(PlaybackQueue.STATE_IDLE)
                 if this.on_error then
                     pcall(this.on_error, "Lỗi tải âm thanh: " .. tostring(result))
