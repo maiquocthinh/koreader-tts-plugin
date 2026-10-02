@@ -11,6 +11,8 @@ local InputDialog = require("ui/widget/inputdialog")
 local ButtonDialog = require("ui/widget/buttondialog")
 local Settings = require("settings")
 local TextChunker = require("text_chunker")
+local TTSClient = require("tts_client")
+local AudioBackend = require("audio_backend")
 
 local ok_gettext, _ = pcall(require, "gettext")
 if not ok_gettext or type(_) ~= "function" then
@@ -25,6 +27,16 @@ local KoreaderTTS = WidgetContainer:extend{
 --- Khởi tạo plugin khi nạp vào KOReader
 function KoreaderTTS:init()
     self.settings = Settings:new()
+    self.tts_client = TTSClient:new{
+        server_url = self.settings:get("server_url"),
+        voice = self.settings:get("voice"),
+        api_key = self.settings:get("api_key"),
+        request_timeout = self.settings:get("request_timeout"),
+    }
+    self.audio_backend = AudioBackend:new{
+        backend_type = self.settings:get("audio_backend"),
+        speed = self.settings:get("speed"),
+    }
     self.ui.menu:registerToMainMenu(self)
 end
 
@@ -41,6 +53,12 @@ function KoreaderTTS:addToMainMenu(menu_items)
                 end,
             },
             {
+                text = _("🔊 Phát thử 1 câu (Test Audio & API)"),
+                callback = function()
+                    self:onTestSingleSentence()
+                end,
+            },
+            {
                 text = _("⚙ Cài đặt máy chủ & Giọng đọc..."),
                 callback = function()
                     self:showSettingsDialog()
@@ -48,6 +66,72 @@ function KoreaderTTS:addToMainMenu(menu_items)
             },
         },
     }
+end
+
+--- Thử nghiệm phát câu đầu tiên trên trang (Task 3.3)
+function KoreaderTTS:onTestSingleSentence()
+    local document = self.ui and self.ui.document
+    local current_page = 1
+    if self.view and self.view.state and self.view.state.page then
+        current_page = self.view.state.page
+    elseif document and type(document.getCurrentPage) == "function" then
+        current_page = document:getCurrentPage() or 1
+    end
+
+    local chunker = TextChunker:new{
+        min_chars = 30,
+        max_chars = self.settings:get("max_chunk_chars") or 300,
+        filter_footnotes = self.settings:get("filter_footnotes"),
+        custom_mappings = self.settings:getCustomMappings(),
+    }
+
+    local chunks = chunker:extractPageChunks(document, current_page)
+    if #chunks == 0 then
+        UIManager:show(InfoMessage:new{
+            text = _("Trang hiện tại không có nội dung chữ để đọc."),
+            timeout = 3,
+        })
+        return
+    end
+
+    local first_chunk = chunks[1]
+    UIManager:show(InfoMessage:new{
+        text = string.format(_("Đang tải âm thanh cho câu 1...\n'%s'"), first_chunk.text),
+        timeout = 2,
+    })
+
+    -- Đồng bộ cấu hình mới nhất từ settings
+    self.tts_client.server_url = self.settings:get("server_url")
+    self.tts_client.voice = self.settings:get("voice")
+    self.tts_client.api_key = self.settings:get("api_key")
+    self.tts_client.timeout = self.settings:get("request_timeout")
+    self.audio_backend:setSpeed(self.settings:get("speed"))
+
+    local this = self
+    self.tts_client:fetchSpeechAsync(first_chunk.text, function(success, result_or_err)
+        if not success then
+            UIManager:show(InfoMessage:new{
+                text = string.format(_("Lỗi tải âm thanh từ TTS Server:\n%s"), tostring(result_or_err)),
+                timeout = 5,
+            })
+            return
+        end
+
+        local wav_path = result_or_err
+        UIManager:show(InfoMessage:new{
+            text = string.format(_("Đang phát câu 1...\n'%s'"), first_chunk.text),
+            timeout = 2,
+        })
+
+        this.audio_backend:play(wav_path, function(finished)
+            if finished then
+                UIManager:show(InfoMessage:new{
+                    text = _("Đã phát xong câu thử nghiệm!"),
+                    timeout = 2,
+                })
+            end
+        end)
+    end)
 end
 
 --- Xử lý sự kiện bắt đầu đọc TTS (Task 2.1)
@@ -455,6 +539,15 @@ function KoreaderTTS:showSettingsDialog()
                 callback = function()
                     UIManager:close(this.settings_dialog)
                     this:showWordMappingDialog()
+                end,
+            },
+        },
+        {
+            {
+                text = _("5. Phát thử âm thanh (Test Audio & API)"),
+                callback = function()
+                    UIManager:close(this.settings_dialog)
+                    this:onTestSingleSentence()
                 end,
             },
         },

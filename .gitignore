@@ -6,3 +6,4 @@ docs/
 .calude/
 skills-lock.json
 vieneu-tts/
+cache/

@@ -65,13 +65,21 @@ print(string.format("  -> Menu hiển thị: '%s'", reader_menu.koreader_tts.tex
 
 -- 2. Kiểm tra các menu con
 local sub_items = reader_menu.koreader_tts.sub_item_table
-assert(#sub_items == 2, "LỖI: Thiếu mục menu con!")
-print(string.format("  -> Menu con 1: '%s'", sub_items[1].text))
-print(string.format("  -> Menu con 2: '%s'", sub_items[2].text))
+assert(#sub_items >= 2, "LỖI: Thiếu mục menu con!")
+for idx, item in ipairs(sub_items) do
+    print(string.format("  -> Menu con %d: '%s'", idx, item.text))
+end
 
 -- 3. Người dùng chạm vào mục '⚙ Cài đặt máy chủ & Giọng đọc...'
 MockKOReader.UIManager:reset()
-local settings_menu_item = sub_items[2]
+local settings_menu_item = nil
+for _, item in ipairs(sub_items) do
+    if item.text:find("Cài đặt") then
+        settings_menu_item = item
+        break
+    end
+end
+assert(settings_menu_item ~= nil, "LỖI: Không tìm thấy mục menu Cài đặt!")
 settings_menu_item.callback()
 
 assert(#MockKOReader.UIManager._shown_widgets >= 1, "LỖI: Không có widget nào được hiển thị qua UIManager!")

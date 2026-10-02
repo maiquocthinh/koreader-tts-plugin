@@ -65,6 +65,8 @@ end
 local UIManager = {
     _shown_widgets = {},
     _closed_widgets = {},
+    _scheduled_tasks = {},
+    _current_time = 0,
 }
 
 function UIManager:show(widget)
@@ -75,9 +77,57 @@ function UIManager:close(widget)
     table.insert(self._closed_widgets, widget)
 end
 
+function UIManager:scheduleIn(delay, func)
+    local task = {
+        delay = delay or 0,
+        func = func,
+        trigger_time = self._current_time + (delay or 0),
+        cancelled = false,
+    }
+    table.insert(self._scheduled_tasks, task)
+    return task
+end
+
+function UIManager:unschedule(task)
+    if task then
+        task.cancelled = true
+    end
+end
+
+function UIManager:tick(seconds)
+    local dt = seconds or 0.05
+    self._current_time = self._current_time + dt
+    local remaining = {}
+    -- Sort or execute ready tasks
+    for _, task in ipairs(self._scheduled_tasks) do
+        if not task.cancelled then
+            if self._current_time >= task.trigger_time then
+                local ok, err = pcall(task.func)
+                if not ok and _G.logger and _G.logger.err then
+                    _G.logger.err("Mock UIManager task error: " .. tostring(err))
+                end
+            else
+                table.insert(remaining, task)
+            end
+        end
+    end
+    self._scheduled_tasks = remaining
+end
+
+function UIManager:runAllScheduled(max_iterations)
+    local iter = 0
+    max_iterations = max_iterations or 100
+    while #self._scheduled_tasks > 0 and iter < max_iterations do
+        iter = iter + 1
+        self:tick(0.05)
+    end
+end
+
 function UIManager:reset()
     self._shown_widgets = {}
     self._closed_widgets = {}
+    self._scheduled_tasks = {}
+    self._current_time = 0
 end
 
 local MockWidget = {}
@@ -96,10 +146,43 @@ function MockWidget:onShowKeyboard()
     self._keyboard_shown = true
 end
 
+local MockDevice = {
+    _platform = "desktop",
+}
+
+function MockDevice:setPlatform(platform)
+    self._platform = platform or "desktop"
+end
+
+function MockDevice:isAndroid()
+    return self._platform == "android"
+end
+
+function MockDevice:isLinux()
+    return self._platform == "linux" or self._platform == "kobo" or self._platform == "kindle"
+end
+
+function MockDevice:isKobo()
+    return self._platform == "kobo"
+end
+
+function MockDevice:isKindle()
+    return self._platform == "kindle"
+end
+
+function MockDevice:isDesktop()
+    return self._platform == "desktop"
+end
+
+function MockDevice:isPocketBook()
+    return self._platform == "pocketbook"
+end
+
 -- 4. Setup global KOReader environment and mock packages
 function MockKOReader.installGlobals()
     _G._ = MockKOReader.gettext
     _G.G_reader_settings = MockKOReader.createMockSettings()
+    _G.Device = MockDevice
     _G.logger = {
         dbg = function(...) end,
         info = function(...) end,
@@ -110,6 +193,9 @@ function MockKOReader.installGlobals()
     -- Mock các require() của KOReader
     package.preload["gettext"] = function()
         return MockKOReader.gettext
+    end
+    package.preload["device"] = function()
+        return MockDevice
     end
     package.preload["ui/widget/widgetcontainer"] = function()
         return WidgetContainer

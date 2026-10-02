@@ -213,7 +213,7 @@ run_test("Hook addToMainMenu đăng ký mục menu hợp lệ", function()
     assert(menu_items.koreader_tts ~= nil, "menu_items phải chứa koreader_tts")
     assert(menu_items.koreader_tts.text == "Đọc bằng giọng nói (TTS)")
     assert(type(menu_items.koreader_tts.sub_item_table) == "table")
-    assert(#menu_items.koreader_tts.sub_item_table == 2)
+    assert(#menu_items.koreader_tts.sub_item_table >= 2)
 end)
 
 -- Test 11: Mở hộp thoại cài đặt showSettingsDialog (Task 1.3)
