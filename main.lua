@@ -13,6 +13,7 @@ local Settings = require("settings")
 local TextChunker = require("text_chunker")
 local TTSClient = require("tts_client")
 local AudioBackend = require("audio_backend")
+local PlaybackQueue = require("playback_queue")
 
 local ok_gettext, _ = pcall(require, "gettext")
 if not ok_gettext or type(_) ~= "function" then
@@ -37,6 +38,48 @@ function KoreaderTTS:init()
         backend_type = self.settings:get("audio_backend"),
         speed = self.settings:get("speed"),
     }
+
+    local this = self
+    local chunker = TextChunker:new{
+        min_chars = 30,
+        max_chars = self.settings:get("max_chunk_chars") or 300,
+        filter_footnotes = self.settings:get("filter_footnotes"),
+        custom_mappings = self.settings:getCustomMappings(),
+    }
+    self.chunker = chunker
+
+    self.playback_queue = PlaybackQueue:new{
+        ui = self.ui,
+        document = self.ui and self.ui.document,
+        chunker = chunker,
+        tts_client = self.tts_client,
+        audio_backend = self.audio_backend,
+        settings = self.settings,
+        on_chunk_change = function(chunk, page, index, total)
+            if _G.logger and _G.logger.info then
+                _G.logger.info(string.format("[TTS Queue] Trang %d | Câu %d/%d: %s", page, index, total, chunk.text))
+            end
+        end,
+        on_page_turn = function(new_page)
+            UIManager:show(InfoMessage:new{
+                text = string.format(_("Tự động lật sang trang %d"), new_page),
+                timeout = 1,
+            })
+        end,
+        on_finished = function()
+            UIManager:show(InfoMessage:new{
+                text = _("Đã đọc xong toàn bộ văn bản."),
+                timeout = 3,
+            })
+        end,
+        on_error = function(err)
+            UIManager:show(InfoMessage:new{
+                text = string.format(_("Lỗi phát âm thanh:\n%s"), tostring(err)),
+                timeout = 4,
+            })
+        end,
+    }
+
     self.ui.menu:registerToMainMenu(self)
 end
 
@@ -53,6 +96,30 @@ function KoreaderTTS:addToMainMenu(menu_items)
                 end,
             },
             {
+                text = _("⏯ Tạm dừng / Tiếp tục"),
+                callback = function()
+                    self:onTogglePlayPause()
+                end,
+            },
+            {
+                text = _("⏭ Câu tiếp theo"),
+                callback = function()
+                    self:onNextChunk()
+                end,
+            },
+            {
+                text = _("⏮ Câu trước đó"),
+                callback = function()
+                    self:onPrevChunk()
+                end,
+            },
+            {
+                text = _("⏹ Dừng đọc TTS"),
+                callback = function()
+                    self:onStopTTS()
+                end,
+            },
+            {
                 text = _("🔊 Phát thử 1 câu (Test Audio & API)"),
                 callback = function()
                     self:onTestSingleSentence()
@@ -66,6 +133,38 @@ function KoreaderTTS:addToMainMenu(menu_items)
             },
         },
     }
+end
+
+--- Tạm dừng hoặc tiếp tục đọc
+function KoreaderTTS:onTogglePlayPause()
+    if self.playback_queue then
+        self.playback_queue:togglePlayPause()
+    end
+end
+
+--- Chuyển tới câu tiếp theo
+function KoreaderTTS:onNextChunk()
+    if self.playback_queue then
+        self.playback_queue:nextChunk()
+    end
+end
+
+--- Quay lại câu trước đó
+function KoreaderTTS:onPrevChunk()
+    if self.playback_queue then
+        self.playback_queue:prevChunk()
+    end
+end
+
+--- Dừng đọc TTS
+function KoreaderTTS:onStopTTS()
+    if self.playback_queue then
+        self.playback_queue:stop()
+        UIManager:show(InfoMessage:new{
+            text = _("Đã dừng đọc TTS."),
+            timeout = 2,
+        })
+    end
 end
 
 --- Thử nghiệm phát câu đầu tiên trên trang (Task 3.3)
@@ -134,7 +233,7 @@ function KoreaderTTS:onTestSingleSentence()
     end)
 end
 
---- Xử lý sự kiện bắt đầu đọc TTS (Task 2.1)
+--- Xử lý sự kiện bắt đầu đọc TTS (Task 2.1 & Phase 4 Preload Queue)
 function KoreaderTTS:onStartTTS()
     local document = self.ui and self.ui.document
     local current_page = 1
@@ -144,12 +243,24 @@ function KoreaderTTS:onStartTTS()
         current_page = document:getCurrentPage() or 1
     end
 
+    -- Cập nhật cấu hình mới nhất vào các subsystem
+    if self.tts_client then
+        self.tts_client.server_url = self.settings:get("server_url")
+        self.tts_client.voice = self.settings:get("voice")
+        self.tts_client.api_key = self.settings:get("api_key")
+        self.tts_client.timeout = self.settings:get("request_timeout")
+    end
+    if self.audio_backend then
+        self.audio_backend:setSpeed(self.settings:get("speed"))
+    end
+
     local chunker = TextChunker:new{
         min_chars = 30,
         max_chars = self.settings:get("max_chunk_chars") or 300,
         filter_footnotes = self.settings:get("filter_footnotes"),
         custom_mappings = self.settings:getCustomMappings(),
     }
+    self.chunker = chunker
 
     local chunks = chunker:extractPageChunks(document, current_page)
     local chunk_count = #chunks
@@ -164,13 +275,21 @@ function KoreaderTTS:onStartTTS()
 
     local preview = (chunk_count > 0) and chunks[1].text or _("(Trang trống hoặc không có chữ)")
     local msg = string.format(
-        _("VieNeu TTS Plugin (Phase 2):\nTrang: %d | Tổng số câu: %d\nCâu 1: %s\n\n(Hàng đợi âm thanh và tải đệm sẽ kích hoạt ở Giai đoạn 3)"),
+        _("VieNeu TTS Plugin (Phase 4 Preload Pipeline):\nTrang: %d | Tổng số câu: %d\nCâu 1: %s"),
         current_page, chunk_count, preview
     )
     UIManager:show(InfoMessage:new{
         text = msg,
-        timeout = 5,
+        timeout = 3,
     })
+
+    -- Kích hoạt hàng đợi đệm phát liên tục từ câu 1 của trang hiện tại
+    if self.playback_queue and chunk_count > 0 then
+        self.playback_queue.document = document
+        self.playback_queue.chunker = chunker
+        self.playback_queue:start(current_page, 1)
+    end
+
     return chunks
 end
 

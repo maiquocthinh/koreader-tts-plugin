@@ -247,6 +247,93 @@ function MockKOReader.createMockMuPDFDocument(sample_text, sample_bboxes)
     }
 end
 
+--- Mock tài liệu đa trang (hỗ trợ kiểm thử chuyển trang & tải xuyên trang)
+function MockKOReader.createMockMultiPageDocument(pages_text_table, total_pages)
+    pages_text_table = pages_text_table or {}
+    total_pages = total_pages or #pages_text_table
+    local current_page = 1
+
+    return {
+        _engine = "crengine",
+        _pages = pages_text_table,
+        _total_pages = total_pages,
+        getTextFromPositions = function(self, page)
+            local p = page or current_page
+            return self._pages[p] or ""
+        end,
+        getWordBBoxes = function(self, page)
+            return {
+                { x = 20, y = 50, w = 200, h = 20 },
+                { x = 20, y = 80, w = 180, h = 20 },
+            }
+        end,
+        getCurrentPage = function(self)
+            return current_page
+        end,
+        getPageCount = function(self)
+            return self._total_pages
+        end,
+        _setCurrentPage = function(self, p)
+            current_page = p
+        end,
+    }
+end
+
+--- Mock đối tượng Reader UI (hỗ trợ onNextPage, onPrevPage, gotoPage, view.state.page)
+function MockKOReader.createMockUI(doc, initial_page)
+    initial_page = initial_page or 1
+    local mock_ui = {
+        document = doc,
+        view = {
+            state = {
+                page = initial_page
+            }
+        },
+        _page_turns = 0,
+        menu = {
+            registerToMainMenu = function() end
+        },
+    }
+
+    function mock_ui:onNextPage()
+        self.view.state.page = self.view.state.page + 1
+        self._page_turns = self._page_turns + 1
+        if self.document and self.document._setCurrentPage then
+            self.document:_setCurrentPage(self.view.state.page)
+        end
+        return true
+    end
+
+    function mock_ui:onPrevPage()
+        if self.view.state.page > 1 then
+            self.view.state.page = self.view.state.page - 1
+            self._page_turns = self._page_turns + 1
+            if self.document and self.document._setCurrentPage then
+                self.document:_setCurrentPage(self.view.state.page)
+            end
+        end
+        return true
+    end
+
+    function mock_ui:gotoPage(p)
+        self.view.state.page = p
+        self._page_turns = self._page_turns + 1
+        if self.document and self.document._setCurrentPage then
+            self.document:_setCurrentPage(p)
+        end
+        return true
+    end
+
+    function mock_ui:handleEvent(ev)
+        if ev and ev.name == "GotoPage" and ev.page then
+            return self:gotoPage(ev.page)
+        end
+        return false
+    end
+
+    return mock_ui
+end
+
 MockKOReader.WidgetContainer = WidgetContainer
 MockKOReader.UIManager = UIManager
 

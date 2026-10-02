@@ -210,6 +210,7 @@ end
 -- @param text Chuỗi văn bản tiếng Việt cần đọc
 -- @param callback Hàm phản hồi callback(success, result_or_err): success=true thì result là path file .wav
 -- @param opts Bảng tùy chọn ghi đè: voice, speed, timeout, server_url, api_key
+-- @return function Hàm hủy tác vụ tải (cancel handle)
 function TTSClient:fetchSpeechAsync(text, callback, opts)
     opts = opts or {}
     local voice = opts.voice or self.voice
@@ -218,16 +219,21 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
     local server_url = opts.server_url or self.server_url
     local api_key = opts.api_key or self.api_key
 
+    local is_cancelled = false
+    local function cancel_handle()
+        is_cancelled = true
+    end
+
     if not text or text == "" then
         if callback then callback(false, "Văn bản rỗng") end
-        return
+        return cancel_handle
     end
 
     -- 1. Kiểm tra cache đĩa trước
     local cached, cache_path = self:hasValidCache(text, voice)
     if cached then
         if callback then callback(true, cache_path) end
-        return
+        return cancel_handle
     end
 
     local final_wav_path = self:getCacheFilePath(text, voice)
@@ -236,6 +242,7 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
     -- 2. Mock transport (phục vụ unit test độc lập)
     if self._mock_transport then
         self._mock_transport(text, voice, function(ok, data_or_err)
+            if is_cancelled then return end
             if not ok then
                 if callback then callback(false, data_or_err) end
                 return
@@ -244,12 +251,12 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
             if f then
                 f:write(data_or_err)
                 f:close()
-                if callback then callback(true, final_wav_path) end
+                if not is_cancelled and callback then callback(true, final_wav_path) end
             else
-                if callback then callback(false, "Không thể ghi file cache") end
+                if not is_cancelled and callback then callback(false, "Không thể ghi file cache") end
             end
         end)
-        return
+        return cancel_handle
     end
 
     -- 3. Chuẩn bị payload và headers
@@ -455,11 +462,16 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
 
     -- Runner bơm coroutine với UIManager:scheduleIn() nhường luồng cho UI
     local function pump()
+        if is_cancelled then
+            os.remove(temp_wav_path)
+            return
+        end
+
         local ok, success_or_cont, result_or_err = coroutine.resume(co)
         if not ok then
             -- Lỗi ngoại lệ trong coroutine
             os.remove(temp_wav_path)
-            if callback then callback(false, "Lỗi thực thi coroutine: " .. tostring(success_or_cont)) end
+            if not is_cancelled and callback then callback(false, "Lỗi thực thi coroutine: " .. tostring(success_or_cont)) end
             return
         end
 
@@ -467,15 +479,20 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
             -- Coroutine hoàn thành
             local is_success = success_or_cont
             local res = result_or_err
-            if callback then callback(is_success, res) end
+            if not is_cancelled and callback then callback(is_success, res) end
         else
-            -- Coroutine đang yield, hẹn lịch kiểm tra tiếp sau 20ms
-            UIManager:scheduleIn(0.02, pump)
+            -- Coroutine đang yield, hẹn lịch kiểm tra tiếp sau 20ms nếu chưa bị hủy
+            if not is_cancelled then
+                UIManager:scheduleIn(0.02, pump)
+            else
+                os.remove(temp_wav_path)
+            end
         end
     end
 
     -- Kích hoạt nhịp bơm đầu tiên
     pump()
+    return cancel_handle
 end
 
 --- Cơ chế fallback sử dụng curl (khi chạy trên môi trường test không có socket nhị phân)
