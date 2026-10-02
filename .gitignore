@@ -1,0 +1,8 @@
+# Ignore documentation, agent configurations and third-party references
+docs/
+.agents/
+.agent/
+.claude/
+.calude/
+skills-lock.json
+vieneu-tts/
