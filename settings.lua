@@ -36,6 +36,25 @@ local DEFAULT_SETTINGS = {
     last_book_id        = "",                          -- Định danh sách gần nhất
     last_page           = 1,                           -- Trang đọc gần nhất
     last_chunk_index    = 1,                           -- Vị trí câu đọc dở gần nhất
+
+    -- 6. Từ điển phát âm & Mapping từ đọc (Pronunciation Dictionary)
+    custom_pronunciations = {},                        -- Bảng { [từ_gốc] = "từ_phát_âm" } do người dùng tùy biến
+}
+
+-- Danh mục mặc định các từ viết tắt tiếng Việt chuẩn sang dạng phát âm đầy đủ cho TTS
+local DEFAULT_PRONUNCIATION_MAP = {
+    ["TP."]     = "Thành phố",
+    ["Tp."]     = "Thành phố",
+    ["TS."]     = "Tiến sĩ",
+    ["ThS."]    = "Thạc sĩ",
+    ["PGS."]    = "Phó giáo sư",
+    ["GS."]     = "Giáo sư",
+    ["BS."]     = "Bác sĩ",
+    ["v.v."]    = "vân vân",
+    ["ĐH"]      = "Đại học",
+    ["CNTT"]    = "Công nghệ thông tin",
+    ["NXB"]     = "Nhà xuất bản",
+    ["K/g"]     = "Kính gửi",
 }
 
 local function deep_copy(orig)
@@ -68,7 +87,7 @@ function Settings:new(storage_backend)
             -- Hợp nhất dữ liệu đã lưu với schema mặc định (tự động bổ sung các key mới nếu có cập nhật)
             for k, default_val in pairs(DEFAULT_SETTINGS) do
                 if saved[k] ~= nil and type(saved[k]) == type(default_val) then
-                    instance.data[k] = saved[k]
+                    instance.data[k] = deep_copy(saved[k])
                 end
             end
         end
@@ -181,8 +200,66 @@ function Settings:resetDefaults()
     return true
 end
 
+-- =========================================================================
+-- QUẢN LÝ TỪ ĐIỂN PHÁT ÂM (PRONUNCIATION DICTIONARY CRUD)
+-- =========================================================================
+
+--- Lấy bảng hợp nhất tất cả các quy tắc mapping từ phát âm (Mặc định + Tùy biến)
+-- @return table Bảng mapping { [từ_gốc] = "từ_phát_âm" }
+function Settings:getWordMappings()
+    local merged = deep_copy(DEFAULT_PRONUNCIATION_MAP)
+    local custom = self.data.custom_pronunciations or {}
+    for word, replacement in pairs(custom) do
+        merged[word] = replacement
+    end
+    return merged
+end
+
+--- Lấy danh sách từ mapping do người dùng tự cấu hình
+-- @return table Bảng sao chép các mapping tùy biến
+function Settings:getCustomMappings()
+    return deep_copy(self.data.custom_pronunciations or {})
+end
+
+--- Thêm mới hoặc cập nhật một cặp từ phát âm tùy biến
+-- @param word Từ gốc (viết tắt hoặc từ cần sửa)
+-- @param replacement Từ phát âm thay thế
+-- @return boolean Thành công hay thất bại, string Lỗi nếu có
+function Settings:setWordMapping(word, replacement)
+    if type(word) ~= "string" or word == "" then
+        return false, "Word cannot be empty"
+    end
+    if type(replacement) ~= "string" or replacement == "" then
+        return false, "Replacement cannot be empty"
+    end
+
+    if type(self.data.custom_pronunciations) ~= "table" then
+        self.data.custom_pronunciations = {}
+    end
+    self.data.custom_pronunciations[word] = replacement
+    return true
+end
+
+--- Xóa một từ khỏi danh mục tùy biến của người dùng
+-- @param word Từ cần xóa
+-- @return boolean Thành công hay thất bại
+function Settings:removeWordMapping(word)
+    if type(word) ~= "string" or not self.data.custom_pronunciations then
+        return false
+    end
+    self.data.custom_pronunciations[word] = nil
+    return true
+end
+
+--- Xóa sạch danh sách từ tùy biến, khôi phục về từ điển mặc định ban đầu
+function Settings:resetWordMappings()
+    self.data.custom_pronunciations = {}
+    return true
+end
+
 -- Export module và bảng schema mặc định (hỗ trợ kiểm thử)
 Settings.DEFAULT_SETTINGS = DEFAULT_SETTINGS
+Settings.DEFAULT_PRONUNCIATION_MAP = DEFAULT_PRONUNCIATION_MAP
 Settings.SETTING_KEY = SETTING_KEY
 
 return Settings

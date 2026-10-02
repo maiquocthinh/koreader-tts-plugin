@@ -10,6 +10,7 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local ButtonDialog = require("ui/widget/buttondialog")
 local Settings = require("settings")
+local TextChunker = require("text_chunker")
 
 local ok_gettext, _ = pcall(require, "gettext")
 if not ok_gettext or type(_) ~= "function" then
@@ -49,19 +50,255 @@ function KoreaderTTS:addToMainMenu(menu_items)
     }
 end
 
---- Xử lý sự kiện bắt đầu đọc TTS
+--- Xử lý sự kiện bắt đầu đọc TTS (Task 2.1)
 function KoreaderTTS:onStartTTS()
-    -- ponytail: Phase 1 hiển thị thông báo tiến độ, sẽ nối vào tts_client và audio_backend ở Phase 3
-    local server_url = self.settings:get("server_url") or ""
-    local voice = self.settings:get("voice") or ""
+    local document = self.ui and self.ui.document
+    local current_page = 1
+    if self.view and self.view.state and self.view.state.page then
+        current_page = self.view.state.page
+    elseif document and type(document.getCurrentPage) == "function" then
+        current_page = document:getCurrentPage() or 1
+    end
+
+    local chunker = TextChunker:new{
+        min_chars = 30,
+        max_chars = self.settings:get("max_chunk_chars") or 300,
+        filter_footnotes = self.settings:get("filter_footnotes"),
+        custom_mappings = self.settings:getCustomMappings(),
+    }
+
+    local chunks = chunker:extractPageChunks(document, current_page)
+    local chunk_count = #chunks
+
+    -- In ra console/logger toàn bộ nội dung đã bóc tách (DoD 2.1)
+    if _G.logger and type(_G.logger.info) == "function" then
+        _G.logger.info(string.format("[TTS] Trích xuất trang %d: tìm thấy %d câu.", current_page, chunk_count))
+        for i, c in ipairs(chunks) do
+            _G.logger.info(string.format("[TTS]   Câu %d: %s (bboxes: %d)", i, c.text, #(c.bboxes or {})))
+        end
+    end
+
+    local preview = (chunk_count > 0) and chunks[1].text or _("(Trang trống hoặc không có chữ)")
     local msg = string.format(
-        _("VieNeu TTS Plugin (Phase 1):\nMáy chủ: %s\nGiọng đọc: %s\n\nĐộng cơ âm thanh và tải đệm sẽ kích hoạt ở Giai đoạn 3."),
-        server_url, voice
+        _("VieNeu TTS Plugin (Phase 2):\nTrang: %d | Tổng số câu: %d\nCâu 1: %s\n\n(Hàng đợi âm thanh và tải đệm sẽ kích hoạt ở Giai đoạn 3)"),
+        current_page, chunk_count, preview
     )
     UIManager:show(InfoMessage:new{
         text = msg,
         timeout = 5,
     })
+    return chunks
+end
+
+--- Hộp thoại quản lý Từ điển phát âm / Mapping từ ngữ cho TTS (CRUD UI)
+function KoreaderTTS:showWordMappingDialog()
+    local this = self
+    local custom_mappings = this.settings:getCustomMappings()
+
+    -- 1. Hàm mở popup thêm từ mới
+    local function openAddWordDialog()
+        local word_dialog
+        word_dialog = InputDialog:new{
+            title = _("Nhập từ gốc (viết tắt / từ khó)"),
+            hint = "AI, TP.HCM, CNTT...",
+            buttons = {
+                {
+                    {
+                        text = _("Hủy"),
+                        callback = function()
+                            UIManager:close(word_dialog)
+                            this:showWordMappingDialog()
+                        end,
+                    },
+                    {
+                        text = _("Tiếp tục"),
+                        is_enter_default = true,
+                        callback = function()
+                            local orig_word = word_dialog:getInputText()
+                            UIManager:close(word_dialog)
+                            if orig_word and orig_word ~= "" then
+                                -- Mở tiếp dialog nhập từ đọc thay thế
+                                local repl_dialog
+                                repl_dialog = InputDialog:new{
+                                    title = string.format(_("Từ đọc thay thế cho '%s'"), orig_word),
+                                    hint = _("Ví dụ: Trí tuệ nhân tạo"),
+                                    buttons = {
+                                        {
+                                            {
+                                                text = _("Hủy"),
+                                                callback = function()
+                                                    UIManager:close(repl_dialog)
+                                                    this:showWordMappingDialog()
+                                                end,
+                                            },
+                                            {
+                                                text = _("Lưu"),
+                                                is_enter_default = true,
+                                                callback = function()
+                                                    local repl_word = repl_dialog:getInputText()
+                                                    UIManager:close(repl_dialog)
+                                                    if repl_word and repl_word ~= "" then
+                                                        this.settings:setWordMapping(orig_word, repl_word)
+                                                        this.settings:save()
+                                                        UIManager:show(InfoMessage:new{
+                                                            text = string.format(_("Đã thêm: %s ➔ %s"), orig_word, repl_word),
+                                                            timeout = 2,
+                                                        })
+                                                    end
+                                                    this:showWordMappingDialog()
+                                                end,
+                                            },
+                                        },
+                                    },
+                                }
+                                UIManager:show(repl_dialog)
+                            else
+                                this:showWordMappingDialog()
+                            end
+                        end,
+                    },
+                },
+            },
+        }
+        UIManager:show(word_dialog)
+    end
+
+    -- 2. Hàm mở popup sửa hoặc xóa từ đã có
+    local function openEditOrDeleteDialog(orig_word, current_repl)
+        local action_dialog
+        action_dialog = ButtonDialog:new{
+            title = string.format(_("Từ điển: %s ➔ %s"), orig_word, current_repl),
+            buttons = {
+                {
+                    {
+                        text = _("Sửa từ đọc"),
+                        callback = function()
+                            UIManager:close(action_dialog)
+                            local edit_dialog
+                            edit_dialog = InputDialog:new{
+                                title = string.format(_("Sửa cách đọc cho '%s'"), orig_word),
+                                input = current_repl,
+                                buttons = {
+                                    {
+                                        {
+                                            text = _("Hủy"),
+                                            callback = function()
+                                                UIManager:close(edit_dialog)
+                                                this:showWordMappingDialog()
+                                            end,
+                                        },
+                                        {
+                                            text = _("Lưu"),
+                                            is_enter_default = true,
+                                            callback = function()
+                                                local new_repl = edit_dialog:getInputText()
+                                                UIManager:close(edit_dialog)
+                                                if new_repl and new_repl ~= "" then
+                                                    this.settings:setWordMapping(orig_word, new_repl)
+                                                    this.settings:save()
+                                                    UIManager:show(InfoMessage:new{
+                                                        text = _("Đã cập nhật cách đọc thành công!"),
+                                                        timeout = 2,
+                                                    })
+                                                end
+                                                this:showWordMappingDialog()
+                                            end,
+                                        },
+                                    },
+                                },
+                            }
+                            UIManager:show(edit_dialog)
+                        end,
+                    },
+                    {
+                        text = _("Xóa từ này"),
+                        callback = function()
+                            UIManager:close(action_dialog)
+                            this.settings:removeWordMapping(orig_word)
+                            this.settings:save()
+                            UIManager:show(InfoMessage:new{
+                                text = string.format(_("Đã xóa mapping của '%s'."), orig_word),
+                                timeout = 2,
+                            })
+                            this:showWordMappingDialog()
+                        end,
+                    },
+                },
+                {
+                    {
+                        text = _("Quay lại"),
+                        callback = function()
+                            UIManager:close(action_dialog)
+                            this:showWordMappingDialog()
+                        end,
+                    },
+                },
+            },
+        }
+        UIManager:show(action_dialog)
+    end
+
+    -- Tạo danh sách các nút hiển thị các từ đang có
+    local buttons = {
+        {
+            {
+                text = _("+ Thêm từ mapping mới..."),
+                callback = function()
+                    if this.word_mapping_dialog then
+                        UIManager:close(this.word_mapping_dialog)
+                    end
+                    openAddWordDialog()
+                end,
+            },
+        },
+    }
+
+    -- Liệt kê các từ custom hiện có
+    for orig, repl in pairs(custom_mappings) do
+        local w, r = orig, repl
+        table.insert(buttons, {
+            {
+                text = string.format("• %s ➔ %s", w, r),
+                callback = function()
+                    if this.word_mapping_dialog then
+                        UIManager:close(this.word_mapping_dialog)
+                    end
+                    openEditOrDeleteDialog(w, r)
+                end,
+            },
+        })
+    end
+
+    -- Nút khôi phục và đóng
+    table.insert(buttons, {
+        {
+            text = _("Khôi phục từ điển mặc định"),
+            callback = function()
+                this.settings:resetWordMappings()
+                this.settings:save()
+                UIManager:close(this.word_mapping_dialog)
+                UIManager:show(InfoMessage:new{
+                    text = _("Đã xóa sạch từ tùy biến, khôi phục từ điển mặc định."),
+                    timeout = 3,
+                })
+                this:showWordMappingDialog()
+            end,
+        },
+        {
+            text = _("Quay lại Cài đặt"),
+            callback = function()
+                UIManager:close(this.word_mapping_dialog)
+                this.word_mapping_dialog = nil
+                this:showSettingsDialog()
+            end,
+        },
+    })
+
+    this.word_mapping_dialog = ButtonDialog:new{
+        title = _("Quản lý Từ điển Phát âm TTS"),
+        buttons = buttons,
+    }
+    UIManager:show(this.word_mapping_dialog)
 end
 
 --- Hiển thị hộp thoại cài đặt chính của Plugin
@@ -209,6 +446,15 @@ function KoreaderTTS:showSettingsDialog()
                 callback = function()
                     UIManager:close(this.settings_dialog)
                     openSpeedInput()
+                end,
+            },
+        },
+        {
+            {
+                text = _("4. Quản lý Từ điển phát âm (Mapping từ đọc)..."),
+                callback = function()
+                    UIManager:close(this.settings_dialog)
+                    this:showWordMappingDialog()
                 end,
             },
         },

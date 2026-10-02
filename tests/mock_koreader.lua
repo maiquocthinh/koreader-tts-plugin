@@ -128,6 +128,39 @@ function MockKOReader.installGlobals()
     end
 end
 
+-- 5. Mock Document Engines (Crengine & MuPDF)
+function MockKOReader.createMockCrengineDocument(sample_text, sample_bboxes)
+    return {
+        _engine = "crengine",
+        getTextFromPositions = function(self, page)
+            return sample_text or ""
+        end,
+        getWordBBoxes = function(self, page)
+            return sample_bboxes or {
+                { x = 20, y = 50, w = 150, h = 20 },
+                { x = 180, y = 50, w = 120, h = 20 },
+            }
+        end,
+        getCurrentPage = function(self) return 1 end,
+    }
+end
+
+function MockKOReader.createMockMuPDFDocument(sample_text, sample_bboxes)
+    return {
+        _engine = "mupdf",
+        getPageText = function(self, page)
+            return sample_text or ""
+        end,
+        getTextWordBoxes = function(self, page)
+            return sample_bboxes or {
+                { x = 40, y = 80, w = 220, h = 22 },
+                { x = 40, y = 110, w = 180, h = 22 },
+            }
+        end,
+        getCurrentPage = function(self) return 1 end,
+    }
+end
+
 MockKOReader.WidgetContainer = WidgetContainer
 MockKOReader.UIManager = UIManager
 
