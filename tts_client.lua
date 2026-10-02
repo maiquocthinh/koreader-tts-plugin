@@ -395,10 +395,11 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
         -- Phân tích Status Code
         local status_code = tonumber(response_buffer:match("HTTP/%d*%.?%d*%s+(%d+)"))
         if not status_code or status_code < 200 or status_code >= 300 then
-            -- Đọc thêm phần body lỗi (nếu có)
-            local err_body, _ = tcp:receive("*a")
+            -- Đọc thêm phần body lỗi (nếu có), hỗ trợ cả kết quả trong partial khi socket non-blocking
+            local chunk, _, partial = tcp:receive("*a")
+            local err_body = chunk or partial or ""
             tcp:close()
-            return false, string.format("Máy chủ TTS phản hồi lỗi HTTP %s: %s", tostring(status_code or "Unknown"), tostring(err_body or ""))
+            return false, string.format("Máy chủ TTS phản hồi lỗi HTTP %s: %s", tostring(status_code or "Unknown"), tostring(err_body))
         end
 
         -- Bước 5.4: Đọc luồng nhị phân WAV và ghi atomic vào file đệm .tmp
