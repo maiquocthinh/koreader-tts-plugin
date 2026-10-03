@@ -14,6 +14,7 @@ local TextChunker = require("text_chunker")
 local TTSClient = require("tts_client")
 local AudioBackend = require("audio_backend")
 local PlaybackQueue = require("playback_queue")
+local UIPlayer = require("ui_player")
 
 local ok_gettext, _ = pcall(require, "gettext")
 if not ok_gettext or type(_) ~= "function" then
@@ -59,20 +60,37 @@ function KoreaderTTS:init()
             if _G.logger and _G.logger.info then
                 _G.logger.info(string.format("[TTS Queue] Trang %d | Câu %d/%d: %s", page, index, total, chunk.text))
             end
+            if this.ui_player then
+                this.ui_player:onChunkChange(chunk, page, index, total)
+            end
+        end,
+        on_state_change = function(old_state, new_state)
+            if this.ui_player then
+                this.ui_player:onStateChange(old_state, new_state)
+            end
         end,
         on_page_turn = function(new_page)
+            if this.ui_player then
+                this.ui_player:onPageTurn(new_page)
+            end
             UIManager:show(InfoMessage:new{
                 text = string.format(_("Tự động lật sang trang %d"), new_page),
                 timeout = 1,
             })
         end,
         on_finished = function()
+            if this.ui_player then
+                this.ui_player:onFinished()
+            end
             UIManager:show(InfoMessage:new{
                 text = _("Đã đọc xong toàn bộ văn bản."),
                 timeout = 3,
             })
         end,
         on_error = function(err)
+            if this.ui_player then
+                this.ui_player:onError(err)
+            end
             UIManager:show(InfoMessage:new{
                 text = string.format(_("Lỗi phát âm thanh:\n%s"), tostring(err)),
                 timeout = 4,
@@ -80,7 +98,18 @@ function KoreaderTTS:init()
         end,
     }
 
-    self.ui.menu:registerToMainMenu(self)
+    self.ui_player = UIPlayer:new{
+        ui = self.ui,
+        view = self.view or (self.ui and self.ui.view),
+        playback_queue = self.playback_queue,
+        settings = self.settings,
+        audio_backend = self.audio_backend,
+        chunker = chunker,
+    }
+
+    if self.ui and self.ui.menu and type(self.ui.menu.registerToMainMenu) == "function" then
+        self.ui.menu:registerToMainMenu(self)
+    end
 end
 
 --- Hook đăng ký vào Reader Top Menu của KOReader
@@ -93,6 +122,12 @@ function KoreaderTTS:addToMainMenu(menu_items)
                 text = _("▶ Bắt đầu đọc từ vị trí này"),
                 callback = function()
                     self:onStartTTS()
+                end,
+            },
+            {
+                text = _("🎛 Hiện/Ẩn thanh điều khiển"),
+                callback = function()
+                    self:onToggleUIPlayer()
                 end,
             },
             {
@@ -133,6 +168,18 @@ function KoreaderTTS:addToMainMenu(menu_items)
             },
         },
     }
+end
+
+--- Hiện hoặc ẩn thanh điều khiển nổi
+function KoreaderTTS:onToggleUIPlayer()
+    if self.ui_player then
+        if self.ui_player.visible then
+            self.ui_player:hide()
+        else
+            self.ui_player.view = self.view or (self.ui and self.ui.view)
+            self.ui_player:show()
+        end
+    end
 end
 
 --- Tạm dừng hoặc tiếp tục đọc
@@ -287,10 +334,72 @@ function KoreaderTTS:onStartTTS()
     if self.playback_queue and chunk_count > 0 then
         self.playback_queue.document = document
         self.playback_queue.chunker = chunker
+        if self.ui_player then
+            self.ui_player.view = self.view or (self.ui and self.ui.view)
+            self.ui_player:show()
+        end
         self.playback_queue:start(current_page, 1)
     end
 
     return chunks
+end
+
+--- Hook vào menu bôi đen văn bản của KOReader (Task 5.4)
+function KoreaderTTS:addToHighlightMenu(menu_items, selected_text)
+    if type(menu_items) == "table" and selected_text and selected_text ~= "" then
+        table.insert(menu_items, {
+            text = _("🔊 Đọc bằng TTS"),
+            callback = function()
+                self:onReadSelectedText(selected_text)
+            end,
+        })
+    end
+end
+
+--- Đọc một đoạn văn bản được bôi đen độc lập (Task 5.4)
+function KoreaderTTS:onReadSelectedText(selected_text)
+    if not selected_text or selected_text == "" then return end
+
+    local chunker = self.chunker or TextChunker:new()
+    local cleaned = chunker:sanitize(selected_text)
+    cleaned = chunker:normalizePronunciation(cleaned, self.settings:getCustomMappings())
+
+    if cleaned == "" then return end
+
+    -- Tạm dừng hàng đợi phát hiện tại nếu đang đọc sách
+    if self.playback_queue and self.playback_queue:getState() == "PLAYING" then
+        self.playback_queue:pause()
+    end
+
+    UIManager:show(InfoMessage:new{
+        text = string.format(_("Đang tải đoạn chọn:\n'%s'"), cleaned:sub(1, 60) .. "..."),
+        timeout = 2,
+    })
+
+    local this = self
+    self.tts_client:fetchSpeechAsync(cleaned, function(success, result_or_err)
+        if not success then
+            UIManager:show(InfoMessage:new{
+                text = string.format(_("Lỗi tải âm thanh đoạn chọn:\n%s"), tostring(result_or_err)),
+                timeout = 4,
+            })
+            return
+        end
+
+        UIManager:show(InfoMessage:new{
+            text = _("Đang phát đoạn chọn..."),
+            timeout = 1,
+        })
+
+        this.audio_backend:play(result_or_err, function(finished)
+            if finished then
+                UIManager:show(InfoMessage:new{
+                    text = _("Đã đọc xong đoạn văn bản được chọn!"),
+                    timeout = 2,
+                })
+            end
+        end)
+    end)
 end
 
 --- Hộp thoại quản lý Từ điển phát âm / Mapping từ ngữ cho TTS (CRUD UI)

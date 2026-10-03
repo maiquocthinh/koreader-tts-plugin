@@ -67,6 +67,7 @@ local UIManager = {
     _closed_widgets = {},
     _scheduled_tasks = {},
     _current_time = 0,
+    _dirty_calls = {},
 }
 
 function UIManager:show(widget)
@@ -75,6 +76,14 @@ end
 
 function UIManager:close(widget)
     table.insert(self._closed_widgets, widget)
+end
+
+function UIManager:setDirty(widget, refresh_type, rects)
+    table.insert(self._dirty_calls, {
+        widget = widget,
+        refresh_type = refresh_type or "full",
+        rects = rects or {},
+    })
 end
 
 function UIManager:scheduleIn(delay, func)
@@ -128,13 +137,37 @@ function UIManager:reset()
     self._closed_widgets = {}
     self._scheduled_tasks = {}
     self._current_time = 0
+    self._dirty_calls = {}
 end
+
+local Blitbuffer = {
+    COLOR_WHITE  = 0xFFFFFF,
+    COLOR_BLACK  = 0x000000,
+    COLOR_GRAY_E = 0xEEEEEE,
+}
+
+local Screen = {
+    getWidth = function() return 600 end,
+    getHeight = function() return 800 end,
+    scaleBySize = function(self, px) return px end,
+}
+
+local Size = {
+    border = {
+        thin = 1,
+        medium = 2,
+    },
+    padding = {
+        default = 5,
+    },
+}
 
 local MockWidget = {}
 MockWidget.__index = MockWidget
 
 function MockWidget:new(o)
     local inst = setmetatable(o or {}, self)
+    inst._children = inst._children or {}
     return inst
 end
 
@@ -144,6 +177,14 @@ end
 
 function MockWidget:onShowKeyboard()
     self._keyboard_shown = true
+end
+
+function MockWidget:setText(text)
+    self.text = text
+end
+
+function MockWidget:setIcon(icon)
+    self.icon = icon
 end
 
 local MockDevice = {
@@ -197,6 +238,15 @@ function MockKOReader.installGlobals()
     package.preload["device"] = function()
         return MockDevice
     end
+    package.preload["device/screen"] = function()
+        return Screen
+    end
+    package.preload["ui/size"] = function()
+        return Size
+    end
+    package.preload["ffi/blitbuffer"] = function()
+        return Blitbuffer
+    end
     package.preload["ui/widget/widgetcontainer"] = function()
         return WidgetContainer
     end
@@ -212,6 +262,28 @@ function MockKOReader.installGlobals()
     package.preload["ui/widget/buttondialog"] = function()
         return MockWidget
     end
+    package.preload["ui/widget/framecontainer"] = function()
+        return MockWidget
+    end
+    package.preload["ui/widget/verticalgroup"] = function()
+        return MockWidget
+    end
+    package.preload["ui/widget/horizontalgroup"] = function()
+        return MockWidget
+    end
+    package.preload["ui/widget/iconbutton"] = function()
+        return MockWidget
+    end
+    package.preload["ui/widget/textwidget"] = function()
+        return MockWidget
+    end
+    package.preload["ui/widget/button"] = function()
+        return MockWidget
+    end
+
+    _G.Screen = Screen
+    _G.Blitbuffer = Blitbuffer
+    _G.Size = Size
 end
 
 -- 5. Mock Document Engines (Crengine & MuPDF)
@@ -279,7 +351,7 @@ function MockKOReader.createMockMultiPageDocument(pages_text_table, total_pages)
     }
 end
 
---- Mock đối tượng Reader UI (hỗ trợ onNextPage, onPrevPage, gotoPage, view.state.page)
+--- Mock đối tượng Reader UI (hỗ trợ onNextPage, onPrevPage, gotoPage, view.state.page, view highlight)
 function MockKOReader.createMockUI(doc, initial_page)
     initial_page = initial_page or 1
     local mock_ui = {
@@ -287,7 +359,17 @@ function MockKOReader.createMockUI(doc, initial_page)
         view = {
             state = {
                 page = initial_page
-            }
+            },
+            _highlight = nil,
+            _highlight_color = nil,
+            setHighlight = function(self, bboxes, color)
+                self._highlight = bboxes
+                self._highlight_color = color
+            end,
+            clearHighlight = function(self)
+                self._highlight = nil
+                self._highlight_color = nil
+            end,
         },
         _page_turns = 0,
         menu = {
