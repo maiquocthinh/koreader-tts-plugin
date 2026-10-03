@@ -1,0 +1,85 @@
+name: Build & Package KOReader TTS Plugin
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Run Unit & Acceptance Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit
+
+      - name: Run All 12 Test Suites
+        run: |
+          luajit tests/test_phase1_settings.lua
+          luajit tests/verify_acceptance_phase1.lua
+          luajit tests/test_phase2_chunker.lua
+          luajit tests/verify_acceptance_phase2.lua
+          luajit tests/test_phase3_network_audio.lua
+          luajit tests/verify_acceptance_phase3.lua
+          luajit tests/test_phase4_queue.lua
+          luajit tests/verify_acceptance_phase4.lua
+          luajit tests/test_phase5_ui.lua
+          luajit tests/verify_acceptance_phase5.lua
+          luajit tests/test_phase6_hardening.lua
+          luajit tests/verify_acceptance_phase6.lua
+
+  package:
+    name: Package Release Artifact
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Plugin Directory
+        run: |
+          mkdir -p dist/koreader_tts.koplugin
+          cp _meta.lua dist/koreader_tts.koplugin/
+          cp main.lua dist/koreader_tts.koplugin/
+          cp settings.lua dist/koreader_tts.koplugin/
+          cp text_chunker.lua dist/koreader_tts.koplugin/
+          cp tts_client.lua dist/koreader_tts.koplugin/
+          cp audio_backend.lua dist/koreader_tts.koplugin/
+          cp playback_queue.lua dist/koreader_tts.koplugin/
+          cp ui_player.lua dist/koreader_tts.koplugin/
+          cp sleep_timer.lua dist/koreader_tts.koplugin/
+          cp README.md dist/koreader_tts.koplugin/
+          cp INSTALL.md dist/koreader_tts.koplugin/
+          cp LICENSE dist/koreader_tts.koplugin/
+
+      - name: Create ZIP Package
+        run: |
+          cd dist
+          zip -r ../koreader_tts.koplugin.zip koreader_tts.koplugin/
+          cd ..
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: koreader_tts.koplugin
+          path: koreader_tts.koplugin.zip
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: koreader_tts.koplugin.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
