@@ -1,11 +1,11 @@
 --[[
-    tests/test_phase4_queue.lua - Bộ kiểm thử độc lập cho Giai đoạn 4 (Phase 4)
-    Kiểm tra:
-      - Máy trạng thái FSM (IDLE, PREFETCHING, PLAYING, PAUSED)
-      - Sliding Window 3 vị trí & Zero-gap playback (< 100ms)
-      - Tải trước xuyên trang (Cross-page preload) & Tự động chuyển trang
-      - Điều hướng câu (Next/Prev/Seek) kèm hủy đệm thông minh theo token
-    Chạy trực tiếp qua: luajit tests/test_phase4_queue.lua
+    tests/test_phase4_queue.lua - Standalone unit test suite for Phase 4
+    Validates:
+      - FSM State Machine (IDLE, PREFETCHING, PLAYING, PAUSED)
+      - 3-slot Sliding Window & Zero-gap playback (< 100ms)
+      - Cross-page preload & auto page-turn
+      - Smart seeking (Next/Prev/Seek) with token-based queue invalidation
+    Run via: luajit tests/test_phase4_queue.lua
 --]]
 
 package.path = "./?.lua;./tests/?.lua;" .. package.path
@@ -30,7 +30,7 @@ local function run_test(name, func)
     end
 end
 
---- Hàm tạo chuỗi nhị phân WAV hợp lệ phục vụ kiểm thử
+--- Helper function to generate valid WAV bytes for tests
 local function create_sample_wav_bytes(duration_seconds, sample_rate)
     sample_rate = sample_rate or 24000
     local channels = 1
@@ -72,13 +72,13 @@ local function create_sample_wav_bytes(duration_seconds, sample_rate)
 end
 
 print("==========================================================")
-print("  CHẠY BỘ KIỂM THỬ ĐỘC LẬP - GIAI ĐOẠN 4 (PHASE 4)")
+print("  STANDALONE TEST SUITE - PHASE 4 (PRELOAD BUFFER QUEUE)")
 print("==========================================================")
 
 local sample_wav_data = create_sample_wav_bytes(0.3, 24000)
 
--- Test 1: Khởi tạo FSM và chuyển đổi trạng thái cơ bản
-run_test("FSM: Chuyển đổi trạng thái IDLE -> PREFETCH -> PLAY -> STOP", function()
+-- Test 1: FSM state transitions
+run_test("FSM: State transitions IDLE -> PREFETCH -> PLAY -> STOP", function()
     MockKOReader.UIManager:reset()
 
     local pages = {
@@ -105,31 +105,31 @@ run_test("FSM: Chuyển đổi trạng thái IDLE -> PREFETCH -> PLAY -> STOP", 
         end
     }
 
-    assert(queue:getState() == PlaybackQueue.STATE_IDLE, "Trạng thái ban đầu phải là IDLE")
+    assert(queue:getState() == PlaybackQueue.STATE_IDLE, "Initial state must be IDLE")
 
-    -- Bắt đầu đọc
+    -- Start reading
     queue:start(1, 1)
 
-    -- Đang tải Slot N -> chuyển PREFETCHING
+    -- Loading Slot N -> transitions to PREFETCHING
     MockKOReader.UIManager:tick(0.01)
 
-    assert(queue:getState() == PlaybackQueue.STATE_PLAYING, "Sau khi tải xong câu 1 phải chuyển sang PLAYING")
+    assert(queue:getState() == PlaybackQueue.STATE_PLAYING, "After chunk 1 downloaded, state must be PLAYING")
 
-    -- Tạm dừng
+    -- Pause
     queue:pause()
-    assert(queue:getState() == PlaybackQueue.STATE_PAUSED, "Gọi pause() phải chuyển sang PAUSED")
+    assert(queue:getState() == PlaybackQueue.STATE_PAUSED, "pause() must transition to PAUSED")
 
-    -- Tiếp tục
+    -- Resume
     queue:resume()
-    assert(queue:getState() == PlaybackQueue.STATE_PLAYING, "Gọi resume() phải chuyển lại PLAYING")
+    assert(queue:getState() == PlaybackQueue.STATE_PLAYING, "resume() must transition to PLAYING")
 
-    -- Dừng
+    -- Stop
     queue:stop()
-    assert(queue:getState() == PlaybackQueue.STATE_IDLE, "Gọi stop() phải chuyển về IDLE")
+    assert(queue:getState() == PlaybackQueue.STATE_IDLE, "stop() must transition to IDLE")
 end)
 
--- Test 2: Sliding Window 3 vị trí (Slot N, N+1, N+2)
-run_test("Sliding Window: Duy trì 3 slots kế tiếp nhau", function()
+-- Test 2: Sliding Window 3 slots
+run_test("Sliding Window: Maintains 3 contiguous slots", function()
     MockKOReader.UIManager:reset()
 
     local pages = {
@@ -155,27 +155,27 @@ run_test("Sliding Window: Duy trì 3 slots kế tiếp nhau", function()
     queue:start(1, 1)
     MockKOReader.UIManager:tick(0.05)
 
-    -- Kiểm tra 3 slots:
-    -- Slot 0 (N) phải là câu 1
-    -- Slot 1 (N+1) phải là câu 2
-    -- Slot 2 (N+2) phải là câu 3
+    -- Check 3 slots:
+    -- Slot 0 (N) = sentence 1
+    -- Slot 1 (N+1) = sentence 2
+    -- Slot 2 (N+2) = sentence 3
     local s0 = queue:getSlot(0)
     local s1 = queue:getSlot(1)
     local s2 = queue:getSlot(2)
 
-    assert(s0 ~= nil and s0.chunk_index == 1, "Slot 0 phải là câu 1")
-    assert(s1 ~= nil and s1.chunk_index == 2, "Slot 1 phải là câu 2")
-    assert(s2 ~= nil and s2.chunk_index == 3, "Slot 2 phải là câu 3")
+    assert(s0 ~= nil and s0.chunk_index == 1, "Slot 0 must be sentence 1")
+    assert(s1 ~= nil and s1.chunk_index == 2, "Slot 1 must be sentence 2")
+    assert(s2 ~= nil and s2.chunk_index == 3, "Slot 2 must be sentence 3")
 
-    assert(s0.status == "READY", "Slot 0 phải ở trạng thái READY")
-    assert(s1.status == "READY", "Slot 1 phải được tải trước ở trạng thái READY")
-    assert(s2.status == "READY", "Slot 2 phải được tải trước ở trạng thái READY")
+    assert(s0.status == "READY", "Slot 0 must be READY")
+    assert(s1.status == "READY", "Slot 1 must be preloaded READY")
+    assert(s2.status == "READY", "Slot 2 must be preloaded READY")
 
     queue:stop()
 end)
 
 -- Test 3: Zero-gap Playback (< 100ms)
-run_test("Zero-gap: Slot N kết thúc, Slot N+1 phát ngay lập tức", function()
+run_test("Zero-gap: Slot N finishes, Slot N+1 plays immediately", function()
     MockKOReader.UIManager:reset()
 
     local pages = {
@@ -203,23 +203,22 @@ run_test("Zero-gap: Slot N kết thúc, Slot N+1 phát ngay lập tức", functi
     }
 
     queue:start(1, 1)
-    -- Chờ tải xong 3 slots ban đầu
     MockKOReader.UIManager:tick(0.05)
 
-    assert(#chunks_played == 1 and chunks_played[1].index == 1, "Câu 1 phải bắt đầu phát")
+    assert(#chunks_played == 1 and chunks_played[1].index == 1, "Sentence 1 must start playing")
 
-    -- Cho câu 1 phát hết thời lượng (0.3s)
+    -- Sentence 1 completes (0.3s)
     MockKOReader.UIManager:tick(0.35)
 
-    -- Câu 2 phải được kích hoạt ngay lập tức trong cùng nhịp (Zero-gap)
-    assert(#chunks_played == 2 and chunks_played[2].index == 2, "Câu 2 phải được phát ngay lập tức không có khoảng lặng")
-    assert(queue:getCurrentIndex() == 2, "Vị trí hiện tại phải là câu 2")
+    -- Sentence 2 must play immediately (Zero-gap)
+    assert(#chunks_played == 2 and chunks_played[2].index == 2, "Sentence 2 must play immediately without pause")
+    assert(queue:getCurrentIndex() == 2, "Current index must be sentence 2")
 
     queue:stop()
 end)
 
--- Test 4: Tải trước xuyên trang khi gặp câu áp chót
-run_test("Cross-page Preload: Tải trước câu 1 trang sau khi tới câu áp chót", function()
+-- Test 4: Cross-page preload at second-to-last chunk
+run_test("Cross-page Preload: Preloads next page chunk 1", function()
     MockKOReader.UIManager:reset()
 
     local pages = {
@@ -246,23 +245,22 @@ run_test("Cross-page Preload: Tải trước câu 1 trang sau khi tới câu áp
         audio_backend = audio_backend,
     }
 
-    -- Bắt đầu tại câu 1 trang 1 (đây cũng chính là câu áp chót vì trang 1 có 2 câu)
     queue:start(1, 1)
     MockKOReader.UIManager:tick(0.05)
 
-    -- Slot 0: Trang 1 Câu 1
-    -- Slot 1: Trang 1 Câu 2
-    -- Slot 2: Trang 2 Câu 1 (Được tải trước xuyên trang!)
+    -- Slot 0: Page 1 Chunk 1
+    -- Slot 1: Page 1 Chunk 2
+    -- Slot 2: Page 2 Chunk 1 (Preloaded across page boundary!)
     local s2 = queue:getSlot(2)
-    assert(s2 ~= nil, "Slot 2 phải tồn tại")
-    assert(s2.page == 2 and s2.chunk_index == 1, "Slot 2 phải là Câu 1 của Trang 2")
-    assert(s2.status == "READY", "Slot 2 (Trang 2 Câu 1) phải được tải trước ở trạng thái READY")
+    assert(s2 ~= nil, "Slot 2 must exist")
+    assert(s2.page == 2 and s2.chunk_index == 1, "Slot 2 must be Page 2 Chunk 1")
+    assert(s2.status == "READY", "Slot 2 (Page 2 Chunk 1) must be preloaded READY")
 
     queue:stop()
 end)
 
--- Test 5: Tự động lật trang KOReader khi câu cuối kết thúc
-run_test("Auto Page-turn: Tự động lật trang khi đọc hết câu cuối", function()
+-- Test 5: Auto page-turn when last chunk completes
+run_test("Auto Page-turn: Automatically turns page on last chunk", function()
     MockKOReader.UIManager:reset()
 
     local pages = {
@@ -292,23 +290,23 @@ run_test("Auto Page-turn: Tự động lật trang khi đọc hết câu cuối"
         end
     }
 
-    queue:start(1, 2) -- Bắt đầu từ câu 2 (câu cuối trang 1)
+    queue:start(1, 2) -- Start at sentence 2 (last chunk of page 1)
     MockKOReader.UIManager:tick(0.05)
     assert(queue:getCurrentPage() == 1 and queue:getCurrentIndex() == 2)
 
-    -- Phát hết câu 2 trang 1 (thời lượng 0.3s)
+    -- Sentence 2 finishes (0.3s)
     MockKOReader.UIManager:tick(0.35)
 
-    -- Xác nhận đã tự động lật sang trang 2
-    assert(ui.view.state.page == 2, "UI phải tự động lật sang trang 2")
-    assert(page_turned_to == 2, "Callback on_page_turn phải nhận được trang 2")
-    assert(queue:getCurrentPage() == 2 and queue:getCurrentIndex() == 1, "Hàng đợi phải chuyển sang Trang 2 Câu 1")
+    -- Confirm automatic turn to page 2
+    assert(ui.view.state.page == 2, "UI must auto-turn to page 2")
+    assert(page_turned_to == 2, "on_page_turn callback must receive page 2")
+    assert(queue:getCurrentPage() == 2 and queue:getCurrentIndex() == 1, "Queue must advance to Page 2 Chunk 1")
 
     queue:stop()
 end)
 
--- Test 6: Xử lý trang chỉ có 1 câu duy nhất (M = 1)
-run_test("Single Chunk Page: Trang chỉ có 1 câu nạp ngay câu trang sau", function()
+-- Test 6: Single-chunk page handling (M = 1)
+run_test("Single Chunk Page: Preloads next page chunk 1", function()
     MockKOReader.UIManager:reset()
 
     local pages = {
@@ -335,16 +333,16 @@ run_test("Single Chunk Page: Trang chỉ có 1 câu nạp ngay câu trang sau", 
     queue:start(1, 1)
     MockKOReader.UIManager:tick(0.05)
 
-    -- Vì trang 1 chỉ có 1 câu, Slot 1 (N+1) phải chính là Câu 1 của Trang 2
+    -- On single-chunk page, Slot 1 (N+1) must be Page 2 Chunk 1
     local s1 = queue:getSlot(1)
-    assert(s1 ~= nil and s1.page == 2 and s1.chunk_index == 1, "Slot 1 phải là Trang 2 Câu 1")
-    assert(s1.status == "READY", "Slot 1 phải sẵn sàng")
+    assert(s1 ~= nil and s1.page == 2 and s1.chunk_index == 1, "Slot 1 must be Page 2 Chunk 1")
+    assert(s1.status == "READY", "Slot 1 must be ready")
 
     queue:stop()
 end)
 
--- Test 7: Tua câu (nextChunk / prevChunk) & Vô hiệu hóa hàng đợi cũ
-run_test("Seeking: nextChunk/prevChunk hủy âm thanh cũ và đặt vị trí mới", function()
+-- Test 7: Seeking & Token-based Queue Invalidation
+run_test("Seeking: nextChunk/prevChunk cancels audio and sets new pos", function()
     MockKOReader.UIManager:reset()
 
     local pages = {
@@ -369,27 +367,27 @@ run_test("Seeking: nextChunk/prevChunk hủy âm thanh cũ và đặt vị trí 
 
     queue:start(1, 1)
     MockKOReader.UIManager:tick(0.05)
-    assert(queue:getCurrentIndex() == 1, "Đang ở câu 1")
+    assert(queue:getCurrentIndex() == 1, "Currently on chunk 1")
 
     local old_gen = queue.queue_generation
 
-    -- Bấm nextChunk()
+    -- User calls nextChunk()
     queue:nextChunk()
     MockKOReader.UIManager:tick(0.05)
 
-    assert(queue.queue_generation > old_gen, "queue_generation phải tăng để hủy bỏ phiên cũ")
-    assert(queue:getCurrentIndex() == 2, "Sau khi nextChunk() phải nhảy sang câu 2")
+    assert(queue.queue_generation > old_gen, "queue_generation must increment on seek")
+    assert(queue:getCurrentIndex() == 2, "nextChunk() must advance to chunk 2")
 
-    -- Bấm prevChunk()
+    -- User calls prevChunk()
     queue:prevChunk()
     MockKOReader.UIManager:tick(0.05)
-    assert(queue:getCurrentIndex() == 1, "Sau khi prevChunk() phải quay lại câu 1")
+    assert(queue:getCurrentIndex() == 1, "prevChunk() must return to chunk 1")
 
     queue:stop()
 end)
 
--- Test 8: Kết thúc toàn bộ tài liệu gọi on_finished
-run_test("Hết sách: Câu cuối cùng kết thúc gọi on_finished và dừng", function()
+-- Test 8: End of entire document calls on_finished
+run_test("End of Book: Last chunk completes, calls on_finished", function()
     MockKOReader.UIManager:reset()
 
     local pages = {
@@ -420,13 +418,13 @@ run_test("Hết sách: Câu cuối cùng kết thúc gọi on_finished và dừn
     MockKOReader.UIManager:tick(0.05)
     assert(queue:getState() == PlaybackQueue.STATE_PLAYING)
 
-    -- Phát hết thời lượng câu cuối
+    -- Last sentence completes
     MockKOReader.UIManager:tick(0.35)
 
-    assert(finished_called == true, "on_finished phải được gọi khi hết sách")
-    assert(queue:getState() == PlaybackQueue.STATE_IDLE, "Trạng thái phải trở về IDLE")
+    assert(finished_called == true, "on_finished must be called when book finishes")
+    assert(queue:getState() == PlaybackQueue.STATE_IDLE, "State must return to IDLE")
 end)
 
 print("==========================================================")
-print("  TẤT CẢ 8 BÀI KIỂM THỬ ĐỀU ĐÃ VƯỢT QUA THÀNH CÔNG!     ")
+print("  ALL 8 TESTS PASSED SUCCESSFULLY!                       ")
 print("==========================================================")

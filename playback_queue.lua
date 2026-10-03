@@ -1,10 +1,10 @@
 --[[
-    playback_queue.lua - Quản lý Hàng đợi Đệm & Máy trạng thái phát TTS cho KOReader
-    Triển khai:
-      - Sliding Window 3 vị trí (Slot N, N+1, N+2) cho độ trễ giữa 2 câu < 100ms (Zero-gap)
-      - Tải trước xuyên trang (Cross-page Preload) & Tự động lật trang (Auto Page-turn)
-      - Điều hướng câu (Next/Prev/Seek) kèm hủy đệm thông minh (Queue Invalidation theo token)
-      - FSM 4 trạng thái: IDLE, PREFETCHING, PLAYING, PAUSED
+    playback_queue.lua - Preload Buffer Queue & Playback State Machine for KOReader
+    Features:
+      - 3-slot Sliding Window (Slot N, N+1, N+2) for zero-gap playback (< 100ms)
+      - Cross-page preload & auto page-turn
+      - Smart seeking (Next/Prev/Seek) with token-based queue invalidation
+      - FSM 4 states: IDLE, PREFETCHING, PLAYING, PAUSED
 --]]
 
 local ok_uimanager, UIManager = pcall(require, "ui/uimanager")
@@ -19,20 +19,20 @@ end
 local PlaybackQueue = {}
 PlaybackQueue.__index = PlaybackQueue
 
--- Các trạng thái của Máy trạng thái hữu hạn (FSM)
+-- Finite State Machine (FSM) states
 PlaybackQueue.STATE_IDLE        = "IDLE"
 PlaybackQueue.STATE_PREFETCHING = "PREFETCHING"
 PlaybackQueue.STATE_PLAYING     = "PLAYING"
 PlaybackQueue.STATE_PAUSED      = "PAUSED"
 
---- Khởi tạo PlaybackQueue
--- @param opts Bảng các thành phần phụ thuộc:
---   ui              : đối tượng self.ui của KOReader
---   document        : đối tượng tài liệu sách (Crengine hoặc MuPDF)
---   chunker         : instance TextChunker
---   tts_client      : instance TTSClient
---   audio_backend   : instance AudioBackend
---   settings        : instance Settings
+--- Initialize PlaybackQueue
+-- @param opts Dependency table:
+--   ui              : KOReader self.ui
+--   document        : Book document engine (Crengine or MuPDF)
+--   chunker         : TextChunker instance
+--   tts_client      : TTSClient instance
+--   audio_backend   : AudioBackend instance
+--   settings        : Settings instance
 --   on_chunk_change : function(chunk, page, index, total_on_page)
 --   on_state_change : function(old_state, new_state)
 --   on_page_turn    : function(new_page)
@@ -56,13 +56,13 @@ function PlaybackQueue:new(opts)
     instance.on_finished = opts.on_finished
     instance.on_error = opts.on_error
 
-    -- Trạng thái FSM
+    -- FSM state
     instance.state = PlaybackQueue.STATE_IDLE
 
-    -- Token thế hệ hàng đợi chống race condition khi tua câu hoặc dừng
+    -- Generation token to prevent race conditions on seeking or stopping
     instance.queue_generation = 0
 
-    -- Vị trí câu hiện tại
+    -- Current playback position
     instance.current_page = 1
     instance.current_index = 1
 
@@ -73,50 +73,60 @@ function PlaybackQueue:new(opts)
         [2] = nil,
     }
 
-    -- Cache câu của các trang gần kề { [page_num] = chunks }
+    -- Cache of extracted chunks for nearby pages { [page_num] = chunks }
     instance._page_cache = {}
 
     return instance
 end
 
---- Chuyển đổi trạng thái FSM an toàn và gọi callback
+--- Transition FSM state safely and notify callback
 function PlaybackQueue:_setState(new_state)
     if self.state ~= new_state then
         local old_state = self.state
         self.state = new_state
+
+        -- Standby Lock: Prevent screen sleep while playing audio (Task 6.1)
+        pcall(function()
+            local ok_d, Device = pcall(require, "device")
+            if not ok_d or not Device then Device = _G.Device end
+            if Device and type(Device.preventStandby) == "function" then
+                Device:preventStandby(new_state == PlaybackQueue.STATE_PLAYING)
+            end
+        end)
+
         if self.on_state_change then
             pcall(self.on_state_change, old_state, new_state)
         end
     end
 end
 
---- Lấy trạng thái hiện tại
+--- Get current FSM state
 function PlaybackQueue:getState()
     return self.state
 end
 
---- Lấy đối tượng chunk câu đang phát
+--- Get currently playing chunk table
 function PlaybackQueue:getCurrentChunk()
     local slot = self.slots[0]
     return slot and slot.chunk or nil
 end
 
---- Lấy số trang hiện tại
+--- Get current page number
 function PlaybackQueue:getCurrentPage()
     return self.current_page
 end
 
---- Lấy thứ tự câu hiện tại trên trang
+--- Get current chunk index on page
 function PlaybackQueue:getCurrentIndex()
     return self.current_index
 end
 
---- Lấy thông tin slot theo offset (0 = Slot N, 1 = Slot N+1, 2 = Slot N+2)
+--- Get slot by offset (0 = Slot N, 1 = Slot N+1, 2 = Slot N+2)
 function PlaybackQueue:getSlot(offset)
     return self.slots[offset or 0]
 end
 
---- Lấy danh sách câu của một trang (có cache bộ nhớ nhỏ)
+--- Get chunks for a specific page (with small LRU cache)
 function PlaybackQueue:_getPageChunks(page_num)
     if self._page_cache[page_num] then
         return self._page_cache[page_num]
@@ -129,7 +139,7 @@ function PlaybackQueue:_getPageChunks(page_num)
     local chunks = self.chunker:extractPageChunks(self.document, page_num) or {}
     self._page_cache[page_num] = chunks
 
-    -- Dọn dẹp cache nếu lưu quá 5 trang để tiết kiệm RAM
+    -- Prune cache if holding more than 5 pages to conserve RAM
     local count = 0
     for _ in pairs(self._page_cache) do count = count + 1 end
     if count > 5 then
@@ -143,8 +153,9 @@ function PlaybackQueue:_getPageChunks(page_num)
     return chunks
 end
 
---- Tính toán vị trí kế tiếp sau (page_num, chunk_index)
--- @return next_page, next_index (hoặc nil, nil nếu hết sách)
+--- Calculate next sentence position after (page_num, chunk_index)
+-- Skips empty / illustration pages
+-- @return next_page, next_index (or nil, nil if end of document)
 function PlaybackQueue:_getNextPosition(page_num, chunk_index)
     local chunks = self:_getPageChunks(page_num)
     local total_chunks = #chunks
@@ -152,7 +163,7 @@ function PlaybackQueue:_getNextPosition(page_num, chunk_index)
     if chunk_index < total_chunks then
         return page_num, chunk_index + 1
     else
-        -- Hết trang hiện tại, duyệt các trang tiếp theo (bỏ qua các trang trống/hình ảnh)
+        -- End of current page, search subsequent pages skipping blank pages
         local total_pages = 999999
         if self.document and type(self.document.getPageCount) == "function" then
             total_pages = self.document:getPageCount() or total_pages
@@ -170,8 +181,9 @@ function PlaybackQueue:_getNextPosition(page_num, chunk_index)
     end
 end
 
---- Tính toán vị trí trước đó trước (page_num, chunk_index)
--- @return prev_page, prev_index (hoặc nil, nil nếu đang ở đầu sách)
+--- Calculate previous sentence position before (page_num, chunk_index)
+-- Skips empty / illustration pages
+-- @return prev_page, prev_index (or nil, nil if at beginning of document)
 function PlaybackQueue:_getPrevPosition(page_num, chunk_index)
     if chunk_index > 1 then
         return page_num, chunk_index - 1
@@ -188,7 +200,7 @@ function PlaybackQueue:_getPrevPosition(page_num, chunk_index)
     end
 end
 
---- Hủy bỏ mọi tác vụ tải đang diễn ra trong các slots
+--- Cancel all active fetch tasks in slots
 function PlaybackQueue:_cancelActiveFetches()
     for i = 0, 2 do
         local slot = self.slots[i]
@@ -199,7 +211,7 @@ function PlaybackQueue:_cancelActiveFetches()
     end
 end
 
---- Tạo một SlotItem mới
+--- Create a new SlotItem table
 function PlaybackQueue:_createSlotItem(page_num, chunk_index, gen)
     local chunks = self:_getPageChunks(page_num)
     local chunk = chunks[chunk_index]
@@ -217,7 +229,7 @@ function PlaybackQueue:_createSlotItem(page_num, chunk_index, gen)
         cancel_fn = nil,
     }
 
-    -- Kiểm tra cache đĩa đã có sẵn chưa
+    -- Check if valid cache file already exists on disk
     if self.tts_client then
         local cached, cache_path = self.tts_client:hasValidCache(chunk.text, self.tts_client.voice)
         if cached then
@@ -229,7 +241,7 @@ function PlaybackQueue:_createSlotItem(page_num, chunk_index, gen)
     return item
 end
 
---- Kích hoạt tải âm thanh ngầm cho một slot cụ thể
+--- Trigger background fetch for a specific slot offset
 function PlaybackQueue:_fetchSlot(offset)
     local slot = self.slots[offset]
     if not slot or slot.status == "READY" or slot.status == "FETCHING" then
@@ -246,12 +258,12 @@ function PlaybackQueue:_fetchSlot(offset)
     local this = self
 
     slot.cancel_fn = self.tts_client:fetchSpeechAsync(slot.chunk.text, function(success, result)
-        -- Kiểm tra nếu thế hệ đã đổi thì bỏ qua kết quả
+        -- Invalidate if queue generation has changed
         if this.queue_generation ~= expected_gen then
             return
         end
 
-        -- Kiểm tra xem slot này còn tồn tại trong window không (có thể đã được thăng hạng từ slot 1/2 lên slot 0)
+        -- Verify where this slot currently resides in the window (handles promotion from 1/2 to 0)
         local slot_current_offset = nil
         for i = 0, 2 do
             if this.slots[i] == slot then
@@ -270,23 +282,49 @@ function PlaybackQueue:_fetchSlot(offset)
             slot.status = "READY"
             slot.wav_path = result
 
-            -- Nếu slot hiện đang ở vị trí Slot N (offset 0) và FSM đang chờ PREFETCHING -> Kích hoạt phát ngay
+            -- If this slot is now Slot 0 and FSM is awaiting PREFETCHING, trigger playback immediately
             if slot_current_offset == 0 and this.state == PlaybackQueue.STATE_PREFETCHING then
                 this:_playSlot(0)
             end
         else
-            slot.status = "ERROR"
-            if slot_current_offset == 0 and this.state == PlaybackQueue.STATE_PREFETCHING then
-                this:_setState(PlaybackQueue.STATE_IDLE)
-                if this.on_error then
-                    pcall(this.on_error, "Lỗi tải âm thanh: " .. tostring(result))
+            -- Network error classification and resilience handling (Task 6.3)
+            local err_str = tostring(result or "")
+            local is_permanent_error = err_str:find("HTTP 4") or err_str:find("HTTP 5") or err_str:find("Văn bản rỗng") or err_str:find("RIFF")
+
+            if is_permanent_error then
+                -- Permanent server or content error: skip this chunk
+                slot.status = "ERROR_SKIP"
+                if slot_current_offset == 0 and this.state == PlaybackQueue.STATE_PREFETCHING then
+                    if this.on_error then
+                        pcall(this.on_error, _("Bỏ qua câu bị lỗi máy chủ..."))
+                    end
+                    this:nextChunk()
+                end
+            else
+                -- Temporary network issue: retry up to 3 times with backoff
+                slot.retries = (slot.retries or 0) + 1
+                if slot.retries <= 3 then
+                    UIManager:scheduleIn(1.5, function()
+                        if this.queue_generation == expected_gen and slot.status == "FETCHING" then
+                            slot.status = "EMPTY"
+                            this:_fetchSlot(slot_current_offset)
+                        end
+                    end)
+                else
+                    slot.status = "ERROR"
+                    if slot_current_offset == 0 and this.state == PlaybackQueue.STATE_PREFETCHING then
+                        this:_setState(PlaybackQueue.STATE_PAUSED)
+                        if this.on_error then
+                            pcall(this.on_error, _("⚠️ Mất mạng. Đang tạm dừng phát, vui lòng kiểm tra kết nối."))
+                        end
+                    end
                 end
             end
         end
     end)
 end
 
---- Đảm bảo cả 3 slots (N, N+1, N+2) được cấu hình và kích hoạt tải trước
+--- Ensure all 3 slots (N, N+1, N+2) are populated and preloading
 function PlaybackQueue:_ensureWindow()
     local gen = self.queue_generation
 
@@ -320,7 +358,7 @@ function PlaybackQueue:_ensureWindow()
         self.slots[2] = nil
     end
 
-    -- Kích hoạt tải nếu slot chưa sẵn sàng
+    -- Trigger fetches for unready slots
     if self.slots[0] and self.slots[0].status == "EMPTY" then
         self:_fetchSlot(0)
     end
@@ -332,7 +370,7 @@ function PlaybackQueue:_ensureWindow()
     end
 end
 
---- Thực hiện phát âm thanh tại Slot N (offset 0)
+--- Play audio at Slot N (offset 0)
 function PlaybackQueue:_playSlot(offset)
     offset = offset or 0
     local slot = self.slots[offset]
@@ -350,11 +388,27 @@ function PlaybackQueue:_playSlot(offset)
 
     self:_setState(PlaybackQueue.STATE_PLAYING)
 
-    -- Cập nhật trang và câu hiện tại
+    -- Update current position
     self.current_page = slot.page
     self.current_index = slot.chunk_index
 
-    -- Thông báo thay đổi câu để cập nhật UI & Highlight
+    -- Save reading session progress to Settings (Task 6.2)
+    if self.settings and self.document then
+        local book_id = nil
+        if type(self.document.getMD5) == "function" then
+            local ok, md5 = pcall(self.document.getMD5, self.document)
+            if ok and md5 and md5 ~= "" then book_id = tostring(md5) end
+        end
+        if not book_id then
+            book_id = self.document.file or self.document.path or "current_book"
+        end
+        self.settings:set("last_book_id", tostring(book_id))
+        self.settings:set("last_page", slot.page)
+        self.settings:set("last_chunk_index", slot.chunk_index)
+        self.settings:save()
+    end
+
+    -- Notify chunk change for UI update & sentence highlighting
     local chunks_on_page = self:_getPageChunks(self.current_page)
     if self.on_chunk_change then
         pcall(self.on_chunk_change, slot.chunk, self.current_page, self.current_index, #chunks_on_page)
@@ -363,10 +417,10 @@ function PlaybackQueue:_playSlot(offset)
     local expected_gen = self.queue_generation
     local this = self
 
-    -- Kích hoạt phát qua AudioBackend
+    -- Trigger audio playback
     local speed = self.settings and self.settings:get("speed") or 1.0
     self.audio_backend:play(slot.wav_path, function(finished)
-        -- Kiểm tra nếu thế hệ hàng đợi đã bị thay đổi thì bỏ qua callback
+        -- Ignore callback if queue generation has changed
         if this.queue_generation ~= expected_gen then
             return
         end
@@ -377,12 +431,12 @@ function PlaybackQueue:_playSlot(offset)
     end, { speed = speed })
 end
 
---- Thăng hạng Sliding Window khi câu N phát xong (Zero-gap transition)
+--- Advance Sliding Window when sentence N finishes (Zero-gap transition)
 function PlaybackQueue:_advanceWindow()
-    -- Kiểm tra Slot 1 (N+1)
+    -- Check Slot 1 (N+1)
     local next_slot = self.slots[1]
     if not next_slot then
-        -- Đã đọc hết câu cuối cùng của tài liệu
+        -- End of entire book reached
         self:stop()
         if self.on_finished then pcall(self.on_finished) end
         return
@@ -391,7 +445,7 @@ function PlaybackQueue:_advanceWindow()
     local old_page = self.current_page
     local new_page = next_slot.page
 
-    -- Thăng hạng: Slot 1 -> Slot 0; Slot 2 -> Slot 1
+    -- Shift slots: Slot 1 -> Slot 0; Slot 2 -> Slot 1
     self.slots[0] = self.slots[1]
     self.slots[1] = self.slots[2]
     self.slots[2] = nil
@@ -399,12 +453,12 @@ function PlaybackQueue:_advanceWindow()
     self.current_page = self.slots[0].page
     self.current_index = self.slots[0].chunk_index
 
-    -- Nếu sang trang mới: tự động lật trang
+    -- Auto turn page when advancing to a new page
     if new_page > old_page then
         self:_turnPage(new_page)
     end
 
-    -- Bổ sung Slot 2 mới (N+2) và nạp tiếp
+    -- Populate new Slot 2 (N+2) and prefetch
     local p2, i2 = nil, nil
     if self.slots[1] then
         p2, i2 = self:_getNextPosition(self.slots[1].page, self.slots[1].chunk_index)
@@ -416,16 +470,18 @@ function PlaybackQueue:_advanceWindow()
         end
     end
 
-    -- ZERO-GAP: Phát ngay lập tức Slot 0 nếu đã READY
+    -- ZERO-GAP: Play Slot 0 immediately if READY, or skip if ERROR_SKIP
     if self.slots[0].status == "READY" then
         self:_playSlot(0)
+    elseif self.slots[0].status == "ERROR_SKIP" then
+        self:_advanceWindow()
     else
         self:_setState(PlaybackQueue.STATE_PREFETCHING)
         self:_fetchSlot(0)
     end
 end
 
---- Tự động lật trang KOReader
+--- Auto-turn page in KOReader
 function PlaybackQueue:_turnPage(new_page)
     if self.ui then
         pcall(function()
@@ -443,7 +499,7 @@ function PlaybackQueue:_turnPage(new_page)
     end
 end
 
---- Bắt đầu phiên đọc từ một trang và câu cụ thể
+--- Start reading session from specified page and chunk
 function PlaybackQueue:start(page_num, chunk_index)
     page_num = page_num or self.current_page or 1
     chunk_index = chunk_index or 1
@@ -451,7 +507,7 @@ function PlaybackQueue:start(page_num, chunk_index)
     self:seekChunk(page_num, chunk_index)
 end
 
---- Tạm dừng âm thanh
+--- Pause audio playback
 function PlaybackQueue:pause()
     if self.state == PlaybackQueue.STATE_PLAYING or self.state == PlaybackQueue.STATE_PREFETCHING then
         self:_setState(PlaybackQueue.STATE_PAUSED)
@@ -461,20 +517,19 @@ function PlaybackQueue:pause()
     end
 end
 
---- Tiếp tục phát âm thanh
+--- Resume audio playback
 function PlaybackQueue:resume()
     if self.state == PlaybackQueue.STATE_PAUSED then
         if self.audio_backend and self.audio_backend:isPlaying() then
             self.audio_backend:resume()
             self:_setState(PlaybackQueue.STATE_PLAYING)
         else
-            -- Phát lại slot 0 hiện tại
             self:_playSlot(0)
         end
     end
 end
 
---- Chuyển đổi giữa Tạm dừng và Tiếp tục
+--- Toggle between Play and Pause
 function PlaybackQueue:togglePlayPause()
     if self.state == PlaybackQueue.STATE_PLAYING then
         self:pause()
@@ -485,7 +540,7 @@ function PlaybackQueue:togglePlayPause()
     end
 end
 
---- Dừng hoàn toàn phiên đọc
+--- Stop reading session completely
 function PlaybackQueue:stop()
     self.queue_generation = self.queue_generation + 1
     self:_cancelActiveFetches()
@@ -494,11 +549,24 @@ function PlaybackQueue:stop()
         self.audio_backend:stop()
     end
 
+    -- Release standby lock
+    pcall(function()
+        local ok_d, Device = pcall(require, "device")
+        if not ok_d or not Device then Device = _G.Device end
+        if Device and type(Device.preventStandby) == "function" then
+            Device:preventStandby(false)
+        end
+    end)
+
+    if self.settings then
+        self.settings:save()
+    end
+
     self.slots = { [0] = nil, [1] = nil, [2] = nil }
     self:_setState(PlaybackQueue.STATE_IDLE)
 end
 
---- Chuyển tới câu tiếp theo
+--- Navigate to next chunk
 function PlaybackQueue:nextChunk()
     local next_page, next_index = self:_getNextPosition(self.current_page, self.current_index)
     if next_page and next_index then
@@ -509,7 +577,7 @@ function PlaybackQueue:nextChunk()
     end
 end
 
---- Quay lại câu trước đó
+--- Navigate to previous chunk
 function PlaybackQueue:prevChunk()
     local prev_page, prev_index = self:_getPrevPosition(self.current_page, self.current_index)
     if prev_page and prev_index then
@@ -517,29 +585,29 @@ function PlaybackQueue:prevChunk()
     end
 end
 
---- Nhảy tới một câu cụ thể (Smart Seeking & Queue Invalidation)
+--- Seek directly to specified sentence (Smart Seeking & Queue Invalidation)
 function PlaybackQueue:seekChunk(page_num, chunk_index)
-    -- 1. Tăng thế hệ hàng đợi để hủy hoàn toàn tác vụ cũ
+    -- 1. Increment queue generation token to invalidate prior tasks
     self.queue_generation = self.queue_generation + 1
     local gen = self.queue_generation
 
-    -- 2. Dừng phát âm thanh hiện tại
+    -- 2. Stop active audio playback
     if self.audio_backend then
         self.audio_backend:stop()
     end
 
-    -- 3. Hủy bỏ tác vụ tải ngầm cũ
+    -- 3. Cancel active in-flight fetches
     self:_cancelActiveFetches()
 
-    -- 4. Đặt vị trí mới
+    -- 4. Set new target position
     self.current_page = page_num
     self.current_index = chunk_index
     self.slots = { [0] = nil, [1] = nil, [2] = nil }
 
-    -- 5. Thiết lập lại Sliding Window 3 slots
+    -- 5. Rebuild 3-slot window
     self:_ensureWindow()
 
-    -- 6. Nếu slot 0 đã có sẵn -> phát ngay, ngược lại -> prefetching
+    -- 6. If Slot 0 is ready, play immediately; otherwise start prefetching
     if self.slots[0] and self.slots[0].status == "READY" then
         self:_playSlot(0)
     else

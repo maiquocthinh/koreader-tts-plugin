@@ -1,7 +1,7 @@
 --[[
     main.lua - KOReader TTS Plugin Entry Point
     Plugin: koreader_tts
-    Kế thừa WidgetContainer, quản lý vòng đời plugin và menu tích hợp.
+    Inherits from WidgetContainer, manages plugin lifecycle and menu integration.
 --]]
 
 local WidgetContainer = require("ui/widget/widgetcontainer")
@@ -26,7 +26,7 @@ local KoreaderTTS = WidgetContainer:extend{
     is_doc_only = true,
 }
 
---- Khởi tạo plugin khi nạp vào KOReader
+--- Initialize plugin when loaded into KOReader
 function KoreaderTTS:init()
     self.settings = Settings:new()
     self.tts_client = TTSClient:new{
@@ -58,7 +58,7 @@ function KoreaderTTS:init()
         settings = self.settings,
         on_chunk_change = function(chunk, page, index, total)
             if _G.logger and _G.logger.info then
-                _G.logger.info(string.format("[TTS Queue] Trang %d | Câu %d/%d: %s", page, index, total, chunk.text))
+                _G.logger.info(string.format("[TTS Queue] Page %d | Chunk %d/%d: %s", page, index, total, chunk.text))
             end
             if this.ui_player then
                 this.ui_player:onChunkChange(chunk, page, index, total)
@@ -112,65 +112,181 @@ function KoreaderTTS:init()
     end
 end
 
---- Hook đăng ký vào Reader Top Menu của KOReader
--- @param menu_items Bảng danh mục menu của KOReader
+--- Determine unique identifier for current book (Task 6.2)
+function KoreaderTTS:getCurrentBookId()
+    local doc = self.ui and self.ui.document
+    if not doc then return nil end
+    if type(doc.getMD5) == "function" then
+        local ok, md5 = pcall(doc.getMD5, doc)
+        if ok and md5 and md5 ~= "" then return tostring(md5) end
+    end
+    return doc.file or (self.ui and self.ui.doc_path) or doc.path or "current_book"
+end
+
+--- Hook registered to KOReader Reader Top Menu
+-- @param menu_items Menu items table
 function KoreaderTTS:addToMainMenu(menu_items)
+    local sub_items = {
+        {
+            text = _("▶ Bắt đầu đọc từ vị trí này"),
+            callback = function()
+                self:onStartTTS()
+            end,
+        },
+    }
+
+    -- Check for previous session of current book (Task 6.2)
+    local cur_book_id = self:getCurrentBookId()
+    local last_book_id = self.settings:get("last_book_id")
+    local last_page = self.settings:get("last_page") or 1
+    local last_chunk = self.settings:get("last_chunk_index") or 1
+
+    if cur_book_id and last_book_id and cur_book_id == last_book_id and (last_page > 1 or last_chunk > 1) then
+        table.insert(sub_items, {
+            text = string.format(_("⏯ Đọc tiếp tục phiên trước (Trang %d · Câu %d)"), last_page, last_chunk),
+            callback = function()
+                self:onResumePreviousSession()
+            end,
+        })
+    end
+
+    table.insert(sub_items, {
+        text = _("🎛 Hiện/Ẩn thanh điều khiển"),
+        callback = function()
+            self:onToggleUIPlayer()
+        end,
+    })
+    table.insert(sub_items, {
+        text = _("⏯ Tạm dừng / Tiếp tục"),
+        callback = function()
+            self:onTogglePlayPause()
+        end,
+    })
+    table.insert(sub_items, {
+        text = _("⏭ Câu tiếp theo"),
+        callback = function()
+            self:onNextChunk()
+        end,
+    })
+    table.insert(sub_items, {
+        text = _("⏮ Câu trước đó"),
+        callback = function()
+            self:onPrevChunk()
+        end,
+    })
+    table.insert(sub_items, {
+        text = _("⏹ Dừng đọc TTS"),
+        callback = function()
+            self:onStopTTS()
+        end,
+    })
+    table.insert(sub_items, {
+        text = _("⏲ Hẹn giờ tắt (Sleep Timer)..."),
+        callback = function()
+            self:showSleepTimerDialog()
+        end,
+    })
+    table.insert(sub_items, {
+        text = _("🔊 Phát thử 1 câu (Test Audio & API)"),
+        callback = function()
+            self:onTestSingleSentence()
+        end,
+    })
+    table.insert(sub_items, {
+        text = _("⚙ Cài đặt máy chủ & Giọng đọc..."),
+        callback = function()
+            self:showSettingsDialog()
+        end,
+    })
+
     menu_items.koreader_tts = {
         text = _("Đọc bằng giọng nói (TTS)"),
-        sub_item_table = {
-            {
-                text = _("▶ Bắt đầu đọc từ vị trí này"),
-                callback = function()
-                    self:onStartTTS()
-                end,
-            },
-            {
-                text = _("🎛 Hiện/Ẩn thanh điều khiển"),
-                callback = function()
-                    self:onToggleUIPlayer()
-                end,
-            },
-            {
-                text = _("⏯ Tạm dừng / Tiếp tục"),
-                callback = function()
-                    self:onTogglePlayPause()
-                end,
-            },
-            {
-                text = _("⏭ Câu tiếp theo"),
-                callback = function()
-                    self:onNextChunk()
-                end,
-            },
-            {
-                text = _("⏮ Câu trước đó"),
-                callback = function()
-                    self:onPrevChunk()
-                end,
-            },
-            {
-                text = _("⏹ Dừng đọc TTS"),
-                callback = function()
-                    self:onStopTTS()
-                end,
-            },
-            {
-                text = _("🔊 Phát thử 1 câu (Test Audio & API)"),
-                callback = function()
-                    self:onTestSingleSentence()
-                end,
-            },
-            {
-                text = _("⚙ Cài đặt máy chủ & Giọng đọc..."),
-                callback = function()
-                    self:showSettingsDialog()
-                end,
-            },
-        },
+        sub_item_table = sub_items,
     }
 end
 
---- Hiện hoặc ẩn thanh điều khiển nổi
+--- Resume previous reading session (Task 6.2)
+function KoreaderTTS:onResumePreviousSession()
+    local last_page = self.settings:get("last_page") or 1
+    local last_chunk = self.settings:get("last_chunk_index") or 1
+
+    local document = self.ui and self.ui.document
+    if self.playback_queue then
+        self.playback_queue.document = document
+        self.playback_queue.chunker = self.chunker
+        if self.ui_player then
+            self.ui_player.view = self.view or (self.ui and self.ui.view)
+            self.ui_player:show()
+        end
+        self.playback_queue:start(last_page, last_chunk)
+    end
+end
+
+--- Sleep timer settings dialog (Task 6.1)
+function KoreaderTTS:showSleepTimerDialog()
+    local this = self
+    local timer = self.ui_player and self.ui_player.sleep_timer
+    local cur_mode = timer and tostring(timer:getMode()) or "0"
+
+    local dialog
+    local function selectTimer(mode, label)
+        if timer then
+            timer:setMode(mode)
+        end
+        UIManager:close(dialog)
+        UIManager:show(InfoMessage:new{
+            text = string.format(_("Đã cài đặt hẹn giờ: %s"), label),
+            timeout = 2,
+        })
+    end
+
+    local buttons = {
+        {
+            {
+                text = _("Tắt hẹn giờ") .. (cur_mode == "0" and "  ✔" or ""),
+                callback = function() selectTimer("0", _("Tắt")) end,
+            },
+        },
+        {
+            {
+                text = _("15 phút") .. (cur_mode == "15" and "  ✔" or ""),
+                callback = function() selectTimer("15", _("15 phút")) end,
+            },
+        },
+        {
+            {
+                text = _("30 phút") .. (cur_mode == "30" and "  ✔" or ""),
+                callback = function() selectTimer("30", _("30 phút")) end,
+            },
+        },
+        {
+            {
+                text = _("45 phút") .. (cur_mode == "45" and "  ✔" or ""),
+                callback = function() selectTimer("45", _("45 phút")) end,
+            },
+        },
+        {
+            {
+                text = _("Khi đọc hết trang hiện tại") .. (cur_mode == "page" and "  ✔" or ""),
+                callback = function() selectTimer("page", _("Hết trang")) end,
+            },
+        },
+        {
+            {
+                text = _("Đóng"),
+                callback = function() UIManager:close(dialog) end,
+            },
+        },
+    }
+
+    dialog = ButtonDialog:new{
+        title = _("Hẹn giờ tắt đọc (Sleep Timer)"),
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+end
+
+--- Toggle floating control bar visibility
 function KoreaderTTS:onToggleUIPlayer()
     if self.ui_player then
         if self.ui_player.visible then
@@ -182,39 +298,45 @@ function KoreaderTTS:onToggleUIPlayer()
     end
 end
 
---- Tạm dừng hoặc tiếp tục đọc
+--- Toggle play / pause
 function KoreaderTTS:onTogglePlayPause()
     if self.playback_queue then
         self.playback_queue:togglePlayPause()
     end
 end
 
---- Chuyển tới câu tiếp theo
+--- Advance to next chunk
 function KoreaderTTS:onNextChunk()
     if self.playback_queue then
         self.playback_queue:nextChunk()
     end
 end
 
---- Quay lại câu trước đó
+--- Return to previous chunk
 function KoreaderTTS:onPrevChunk()
     if self.playback_queue then
         self.playback_queue:prevChunk()
     end
 end
 
---- Dừng đọc TTS
+--- Stop TTS playback
 function KoreaderTTS:onStopTTS()
     if self.playback_queue then
         self.playback_queue:stop()
-        UIManager:show(InfoMessage:new{
-            text = _("Đã dừng đọc TTS."),
-            timeout = 2,
-        })
     end
+    if self.ui_player then
+        self.ui_player:hide()
+    end
+    if self.tts_client then
+        self.tts_client:clearCache(86400)
+    end
+    UIManager:show(InfoMessage:new{
+        text = _("Đã dừng đọc TTS."),
+        timeout = 2,
+    })
 end
 
---- Thử nghiệm phát câu đầu tiên trên trang (Task 3.3)
+--- Test playback of first sentence on page (Task 3.3)
 function KoreaderTTS:onTestSingleSentence()
     local document = self.ui and self.ui.document
     local current_page = 1
@@ -246,7 +368,7 @@ function KoreaderTTS:onTestSingleSentence()
         timeout = 2,
     })
 
-    -- Đồng bộ cấu hình mới nhất từ settings
+    -- Sync latest configuration from settings
     self.tts_client.server_url = self.settings:get("server_url")
     self.tts_client.voice = self.settings:get("voice")
     self.tts_client.api_key = self.settings:get("api_key")
@@ -280,7 +402,7 @@ function KoreaderTTS:onTestSingleSentence()
     end)
 end
 
---- Xử lý sự kiện bắt đầu đọc TTS (Task 2.1 & Phase 4 Preload Queue)
+--- Start TTS reading session (Task 2.1 & Phase 4 Preload Queue)
 function KoreaderTTS:onStartTTS()
     local document = self.ui and self.ui.document
     local current_page = 1
@@ -290,7 +412,7 @@ function KoreaderTTS:onStartTTS()
         current_page = document:getCurrentPage() or 1
     end
 
-    -- Cập nhật cấu hình mới nhất vào các subsystem
+    -- Update subsystems with latest settings
     if self.tts_client then
         self.tts_client.server_url = self.settings:get("server_url")
         self.tts_client.voice = self.settings:get("voice")
@@ -312,17 +434,17 @@ function KoreaderTTS:onStartTTS()
     local chunks = chunker:extractPageChunks(document, current_page)
     local chunk_count = #chunks
 
-    -- In ra console/logger toàn bộ nội dung đã bóc tách (DoD 2.1)
+    -- Log extracted chunks for debugging (DoD 2.1)
     if _G.logger and type(_G.logger.info) == "function" then
-        _G.logger.info(string.format("[TTS] Trích xuất trang %d: tìm thấy %d câu.", current_page, chunk_count))
+        _G.logger.info(string.format("[TTS] Extracted page %d: found %d chunks.", current_page, chunk_count))
         for i, c in ipairs(chunks) do
-            _G.logger.info(string.format("[TTS]   Câu %d: %s (bboxes: %d)", i, c.text, #(c.bboxes or {})))
+            _G.logger.info(string.format("[TTS]   Chunk %d: %s (bboxes: %d)", i, c.text, #(c.bboxes or {})))
         end
     end
 
     local preview = (chunk_count > 0) and chunks[1].text or _("(Trang trống hoặc không có chữ)")
     local msg = string.format(
-        _("VieNeu TTS Plugin (Phase 4 Preload Pipeline):\nTrang: %d | Tổng số câu: %d\nCâu 1: %s"),
+        _("KOReader TTS Plugin:\nTrang: %d | Tổng số câu: %d\nCâu 1: %s"),
         current_page, chunk_count, preview
     )
     UIManager:show(InfoMessage:new{
@@ -330,7 +452,7 @@ function KoreaderTTS:onStartTTS()
         timeout = 3,
     })
 
-    -- Kích hoạt hàng đợi đệm phát liên tục từ câu 1 của trang hiện tại
+    -- Start preload queue from chunk 1 of current page
     if self.playback_queue and chunk_count > 0 then
         self.playback_queue.document = document
         self.playback_queue.chunker = chunker
@@ -344,7 +466,7 @@ function KoreaderTTS:onStartTTS()
     return chunks
 end
 
---- Hook vào menu bôi đen văn bản của KOReader (Task 5.4)
+--- Hook into KOReader text selection menu (Task 5.4)
 function KoreaderTTS:addToHighlightMenu(menu_items, selected_text)
     if type(menu_items) == "table" and selected_text and selected_text ~= "" then
         table.insert(menu_items, {
@@ -356,7 +478,7 @@ function KoreaderTTS:addToHighlightMenu(menu_items, selected_text)
     end
 end
 
---- Đọc một đoạn văn bản được bôi đen độc lập (Task 5.4)
+--- Read selected text snippet independently (Task 5.4)
 function KoreaderTTS:onReadSelectedText(selected_text)
     if not selected_text or selected_text == "" then return end
 
@@ -366,7 +488,7 @@ function KoreaderTTS:onReadSelectedText(selected_text)
 
     if cleaned == "" then return end
 
-    -- Tạm dừng hàng đợi phát hiện tại nếu đang đọc sách
+    -- Pause active book reading queue if playing
     if self.playback_queue and self.playback_queue:getState() == "PLAYING" then
         self.playback_queue:pause()
     end
@@ -402,12 +524,12 @@ function KoreaderTTS:onReadSelectedText(selected_text)
     end)
 end
 
---- Hộp thoại quản lý Từ điển phát âm / Mapping từ ngữ cho TTS (CRUD UI)
+--- Pronunciation Dictionary Management Dialog (CRUD UI)
 function KoreaderTTS:showWordMappingDialog()
     local this = self
     local custom_mappings = this.settings:getCustomMappings()
 
-    -- 1. Hàm mở popup thêm từ mới
+    -- 1. Open add new mapping dialog
     local function openAddWordDialog()
         local word_dialog
         word_dialog = InputDialog:new{
@@ -429,7 +551,7 @@ function KoreaderTTS:showWordMappingDialog()
                             local orig_word = word_dialog:getInputText()
                             UIManager:close(word_dialog)
                             if orig_word and orig_word ~= "" then
-                                -- Mở tiếp dialog nhập từ đọc thay thế
+                                -- Open replacement input dialog
                                 local repl_dialog
                                 repl_dialog = InputDialog:new{
                                     title = string.format(_("Từ đọc thay thế cho '%s'"), orig_word),
@@ -475,7 +597,7 @@ function KoreaderTTS:showWordMappingDialog()
         UIManager:show(word_dialog)
     end
 
-    -- 2. Hàm mở popup sửa hoặc xóa từ đã có
+    -- 2. Open edit/delete existing mapping dialog
     local function openEditOrDeleteDialog(orig_word, current_repl)
         local action_dialog
         action_dialog = ButtonDialog:new{
@@ -550,7 +672,7 @@ function KoreaderTTS:showWordMappingDialog()
         UIManager:show(action_dialog)
     end
 
-    -- Tạo danh sách các nút hiển thị các từ đang có
+    -- Build button list for existing mappings
     local buttons = {
         {
             {
@@ -565,7 +687,7 @@ function KoreaderTTS:showWordMappingDialog()
         },
     }
 
-    -- Liệt kê các từ custom hiện có
+    -- List custom user mappings
     for orig, repl in pairs(custom_mappings) do
         local w, r = orig, repl
         table.insert(buttons, {
@@ -581,7 +703,7 @@ function KoreaderTTS:showWordMappingDialog()
         })
     end
 
-    -- Nút khôi phục và đóng
+    -- Reset to defaults and close buttons
     table.insert(buttons, {
         {
             text = _("Khôi phục từ điển mặc định"),
@@ -613,7 +735,7 @@ function KoreaderTTS:showWordMappingDialog()
     UIManager:show(this.word_mapping_dialog)
 end
 
---- Hiển thị hộp thoại cài đặt chính của Plugin
+--- Show main plugin settings dialog
 function KoreaderTTS:showSettingsDialog()
     local this = self
 
@@ -728,7 +850,7 @@ function KoreaderTTS:showSettingsDialog()
         UIManager:show(input_dialog)
     end
 
-    -- Menu ButtonDialog tổng hợp để lựa chọn thông số cần sửa
+    -- Main settings dialog buttons
     local current_server = this.settings:get("server_url") or ""
     local current_voice = this.settings:get("voice") or ""
     local current_speed = this.settings:get("speed") or 1.0

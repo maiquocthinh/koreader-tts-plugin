@@ -1,11 +1,11 @@
 --[[
     tests/verify_acceptance_phase5.lua
-    Kịch bản kiểm chứng nghiệm thu đầu-cuối (E2E Acceptance Verification) cho Giai đoạn 5 (Phase 5)
-    Kiểm chứng toàn diện 4 tiêu chí Definition of Done (DoD):
-      - DoD 5.1: Đồng bộ Bôi sáng câu (Highlight) với partial E-ink refresh, chống chớp màn hình
-      - DoD 5.2: Thanh điều khiển nổi neo đáy (Floating Control Bar) 5 nút điều khiển
-      - DoD 5.3: Chuyển đổi linh hoạt giữa Full Bar và Mini Floating Bubble
-      - DoD 5.4: Menu bôi đen văn bản (Selection Reading) phát âm thanh đoạn trích độc lập
+    End-to-End Acceptance Verification script for Phase 5
+    Validates 4 Definition of Done (DoD) criteria:
+      - DoD 5.1: Sentence highlighting with partial E-ink refresh (no flash)
+      - DoD 5.2: Bottom-anchored Floating Control Bar with 5 controls
+      - DoD 5.3: Seamless toggle between Full Bar and Mini Floating Bubble
+      - DoD 5.4: Text Selection Menu (Selection Reading) for standalone snippet playback
 --]]
 
 package.path = "./?.lua;./tests/?.lua;" .. package.path
@@ -21,10 +21,10 @@ local UIPlayer = require("ui_player")
 local KoreaderTTS = require("main")
 
 local function step_banner(num, title)
-    print(string.format("\n=== [BƯỚC %d] %s ===", num, title))
+    print(string.format("\n=== [STEP %d] %s ===", num, title))
 end
 
---- Hàm tạo chuỗi nhị phân WAV hợp lệ phục vụ kiểm thử nghiệm thu
+--- Helper function to generate valid WAV bytes for tests
 local function create_sample_wav_bytes(duration_seconds, sample_rate)
     sample_rate = sample_rate or 24000
     local channels = 1
@@ -68,9 +68,9 @@ end
 local sample_wav_data = create_sample_wav_bytes(0.3, 24000)
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 5.1: Đồng bộ Bôi sáng câu (Highlight) & Partial Refresh
+-- VERIFY DoD 5.1: Sentence Highlighting & Partial E-ink Refresh
 -- =========================================================================
-step_banner(1, "Kiểm chứng DoD 5.1: Đồng bộ Bôi sáng câu & Partial Refresh E-ink")
+step_banner(1, "Verify DoD 5.1: Sentence Highlighting & Partial Refresh")
 
 MockKOReader.UIManager:reset()
 
@@ -90,33 +90,33 @@ local player = UIPlayer:new{
     view = ui.view,
 }
 
--- 1. Bôi sáng câu 1
-print("  -> Bôi sáng câu 1 (2 dòng bboxes) ở chế độ 'gray'...")
+-- 1. Highlight sentence 1
+print("  -> Highlighting sentence 1 (2 line bboxes) in 'gray' mode...")
 player:highlightSentence(sample_bboxes_c1, "gray")
 
-assert(ui.view._highlight ~= nil, "LỖI DoD 5.1: Highlight chưa được gán lên view!")
-assert(ui.view._highlight_color == _G.Blitbuffer.COLOR_GRAY_E, "LỖI DoD 5.1: Màu highlight phải là COLOR_GRAY_E!")
-assert(#ui.view._highlight == 2, "LỖI DoD 5.1: Số lượng bboxes highlight không khớp!")
+assert(ui.view._highlight ~= nil, "ERROR DoD 5.1: Highlight not assigned to view!")
+assert(ui.view._highlight_color == _G.Blitbuffer.COLOR_GRAY_E, "ERROR DoD 5.1: Color must be COLOR_GRAY_E!")
+assert(#ui.view._highlight == 2, "ERROR DoD 5.1: Highlight bboxes count mismatch!")
 
--- Kiểm tra partial refresh chống chớp màn hình
-assert(#MockKOReader.UIManager._dirty_calls >= 1, "LỖI DoD 5.1: Chưa gửi lệnh refresh lên UIManager!")
+-- Verify partial refresh
+assert(#MockKOReader.UIManager._dirty_calls >= 1, "ERROR DoD 5.1: No refresh command sent to UIManager!")
 local dirty_call = MockKOReader.UIManager._dirty_calls[#MockKOReader.UIManager._dirty_calls]
-assert(dirty_call.refresh_type == "partial", "LỖI DoD 5.1: Chế độ refresh phải là 'partial' (không full refresh)!")
-print(string.format("  -> Xác thực UIManager:setDirty: refresh_type = '%s' (Bảo vệ màn E-ink không chớp đen).", dirty_call.refresh_type))
+assert(dirty_call.refresh_type == "partial", "ERROR DoD 5.1: Refresh type must be 'partial' (no full refresh)!")
+print(string.format("  -> Verified UIManager:setDirty: refresh_type = '%s' (E-ink screen flash prevention).", dirty_call.refresh_type))
 
--- 2. Chuyển sang câu 2
-print("  -> Chuyển sang câu 2: làm sạch highlight cũ và áp dụng highlight mới...")
+-- 2. Transition to sentence 2
+print("  -> Transitioning to sentence 2: clearing old highlight and applying new...")
 MockKOReader.UIManager:reset()
 player:highlightSentence(sample_bboxes_c2, "gray")
 
-assert(#ui.view._highlight == 1, "LỖI DoD 5.1: Highlight câu 2 phải có 1 bounding box!")
-assert(#MockKOReader.UIManager._dirty_calls == 1, "LỖI DoD 5.1: Lệnh dirty phải được kích hoạt!")
-print("  [KẾT QUẢ DoD 5.1]: PASS - Bôi sáng câu chuẩn xác, chuyển câu mượt mà với partial refresh.")
+assert(#ui.view._highlight == 1, "ERROR DoD 5.1: Sentence 2 must have 1 bounding box!")
+assert(#MockKOReader.UIManager._dirty_calls == 1, "ERROR DoD 5.1: Dirty command must be triggered!")
+print("  [DoD 5.1 RESULT]: PASS - Sentence highlighting accurate with partial refresh.")
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 5.2: Thanh điều khiển nổi (Floating Control Bar)
+-- VERIFY DoD 5.2: Bottom Floating Control Bar
 -- =========================================================================
-step_banner(2, "Kiểm chứng DoD 5.2: Thanh điều khiển nổi (Floating Control Bar)")
+step_banner(2, "Verify DoD 5.2: Bottom-anchored Floating Control Bar")
 
 MockKOReader.UIManager:reset()
 
@@ -141,67 +141,65 @@ local player2 = UIPlayer:new{
     playback_queue = mock_queue,
 }
 
-print("  -> Hiển thị Thanh điều khiển nổi neo đáy màn hình...")
+print("  -> Displaying bottom-anchored Floating Control Bar...")
 player2:showControlBar()
 
-assert(player2.control_bar ~= nil, "LỖI DoD 5.2: control_bar chưa được tạo!")
-assert(#MockKOReader.UIManager._shown_widgets == 1, "LỖI DoD 5.2: Chưa hiển thị widget lên màn hình!")
+assert(player2.control_bar ~= nil, "ERROR DoD 5.2: control_bar not created!")
+assert(#MockKOReader.UIManager._shown_widgets == 1, "ERROR DoD 5.2: Widget not displayed via UIManager!")
 
--- Kiểm tra nội dung các dòng widget
-print(string.format("  -> Dòng 1 Header: '%s'", player2.title_widget.text))
-print("  -> Dòng 2 Controls: 5 nút điều hướng [|<] [<<] [ || ] [>>] [>|]")
-print(string.format("  -> Dòng 3 Footer: '%s' | '%s'", player2.speed_btn.text, player2.buffer_status_widget.text))
+print(string.format("  -> Row 1 Header: '%s'", player2.title_widget.text))
+print("  -> Row 2 Controls: 5 buttons [|<] [<<] [ || ] [>>] [>|]")
+print(string.format("  -> Row 3 Footer: '%s' | '%s'", player2.speed_btn.text, player2.buffer_status_widget.text))
 
--- Kiểm tra tương tác các nút bấm
 player2:onTogglePlayPause()
-assert(queue_actions[#queue_actions] == "play_pause", "LỖI DoD 5.2: Nút play/pause không kích hoạt queue!")
+assert(queue_actions[#queue_actions] == "play_pause", "ERROR DoD 5.2: Play/pause button did not call queue!")
 
 player2:onNextChunk()
-assert(queue_actions[#queue_actions] == "next_chunk", "LỖI DoD 5.2: Nút next chunk không kích hoạt queue!")
+assert(queue_actions[#queue_actions] == "next_chunk", "ERROR DoD 5.2: Next chunk button did not call queue!")
 
 player2:onPrevChunk()
-assert(queue_actions[#queue_actions] == "prev_chunk", "LỖI DoD 5.2: Nút prev chunk không kích hoạt queue!")
+assert(queue_actions[#queue_actions] == "prev_chunk", "ERROR DoD 5.2: Prev chunk button did not call queue!")
 
 player2:onNextPage()
-assert(queue_actions[#queue_actions] == "seek_2_1", "LỖI DoD 5.2: Nút next page không kích hoạt queue!")
+assert(queue_actions[#queue_actions] == "seek_2_1", "ERROR DoD 5.2: Next page button did not call queue!")
 
-print("  [KẾT QUẢ DoD 5.2]: PASS - Thanh điều khiển nổi hiển thị sắc nét, 5 nút bấm phản hồi chính xác.")
+print("  [DoD 5.2 RESULT]: PASS - Floating Control Bar verified with 5 responsive controls.")
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 5.3: Chế độ Thu nhỏ (Mini Floating Bubble)
+-- VERIFY DoD 5.3: Mini Floating Bubble Mode
 -- =========================================================================
-step_banner(3, "Kiểm chứng DoD 5.3: Chế độ Thu nhỏ (Mini Floating Bubble)")
+step_banner(3, "Verify DoD 5.3: Mini Floating Bubble Mode")
 
-print("  -> Bấm nút [—] trên thanh bar để thu nhỏ thành bong bóng nổi...")
+print("  -> Tapping [—] on control bar to collapse into mini bubble...")
 player2:toggleMode()
 
-assert(player2.is_mini == true, "LỖI DoD 5.3: Cờ is_mini chưa chuyển sang true!")
-assert(player2.control_bar == nil, "LỖI DoD 5.3: Thanh lớn chưa bị đóng!")
-assert(player2.mini_bubble ~= nil, "LỖI DoD 5.3: Mini bubble chưa được hiển thị!")
-print(string.format("  -> Mini Bubble xuất hiện ở góc màn hình: '%s'", player2.mini_label_btn.text))
+assert(player2.is_mini == true, "ERROR DoD 5.3: is_mini flag not set!")
+assert(player2.control_bar == nil, "ERROR DoD 5.3: Control bar not closed!")
+assert(player2.mini_bubble ~= nil, "ERROR DoD 5.3: Mini bubble not shown!")
+print(string.format("  -> Mini Bubble rendered at corner: '%s'", player2.mini_label_btn.text))
 
--- Chạm nút Play trên Bubble
+-- Tap Play on bubble
 local bubble_toggled = false
 mock_queue.togglePlayPause = function() bubble_toggled = true end
 player2.mini_play_btn.callback()
-assert(bubble_toggled == true, "LỖI DoD 5.3: Chạm nút play trên bubble không toggle playback!")
+assert(bubble_toggled == true, "ERROR DoD 5.3: Tapping play on bubble did not toggle playback!")
 
--- Chạm vào phần chữ số để mở rộng lại
-print("  -> Chạm vào phần chữ số trên bong bóng để phóng to trở lại thanh đầy đủ...")
+-- Tap label to restore full control bar
+print("  -> Tapping label text on bubble to restore full control bar...")
 player2.mini_label_btn.callback()
 
-assert(player2.is_mini == false, "LỖI DoD 5.3: Cờ is_mini chưa chuyển lại false!")
-assert(player2.control_bar ~= nil, "LỖI DoD 5.3: Thanh lớn chưa được phục hồi!")
-assert(player2.mini_bubble == nil, "LỖI DoD 5.3: Mini bubble chưa được đóng!")
+assert(player2.is_mini == false, "ERROR DoD 5.3: is_mini flag not reset!")
+assert(player2.control_bar ~= nil, "ERROR DoD 5.3: Full control bar not restored!")
+assert(player2.mini_bubble == nil, "ERROR DoD 5.3: Mini bubble not closed!")
 
-print("  [KẾT QUẢ DoD 5.3]: PASS - Chuyển đổi hai chiều mượt mà giữa Control Bar và Mini Bubble.")
+print("  [DoD 5.3 RESULT]: PASS - Seamless two-way toggle between Control Bar and Mini Bubble.")
 
 player2:hide()
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 5.4: Menu bôi đen văn bản (Selection Reading)
+-- VERIFY DoD 5.4: Text Selection Menu (Selection Reading)
 -- =========================================================================
-step_banner(4, "Kiểm chứng DoD 5.4: Menu bôi đen văn bản (Selection Reading)")
+step_banner(4, "Verify DoD 5.4: Text Selection Menu (Selection Reading)")
 
 MockKOReader.UIManager:reset()
 local plugin = KoreaderTTS:new{
@@ -209,24 +207,22 @@ local plugin = KoreaderTTS:new{
 }
 plugin:init()
 
--- 1. Giả lập menu bôi đen chữ của KOReader
 local highlight_menu = {
-    { text = "Đánh dấu" },
-    { text = "Ghi chú" },
-    { text = "Tra từ" },
+    { text = "Highlight" },
+    { text = "Note" },
+    { text = "Dictionary" },
 }
 
 local selected_snippet = "Ánh trăng bàng bạc chiếu qua khung cửa sổ nhỏ của ngọn hải đăng."
-print(string.format("  -> Người dùng bôi đen đoạn chữ: '%s'", selected_snippet))
+print(string.format("  -> User highlights text snippet: '%s'", selected_snippet))
 
 plugin:addToHighlightMenu(highlight_menu, selected_snippet)
 
-assert(#highlight_menu == 4, "LỖI DoD 5.4: Chưa thêm nút TTS vào highlight menu!")
+assert(#highlight_menu == 4, "ERROR DoD 5.4: TTS button not added to highlight menu!")
 local tts_btn = highlight_menu[4]
-assert(tts_btn.text == "🔊 Đọc bằng TTS", "LỖI DoD 5.4: Tên nút không đúng chuẩn '🔊 Đọc bằng TTS'!")
-print(string.format("  -> Menu bôi đen xuất hiện nút: '%s'", tts_btn.text))
+assert(tts_btn.text == "🔊 Đọc bằng TTS", "ERROR DoD 5.4: Button text mismatch!")
+print(string.format("  -> Highlight menu shows button: '%s'", tts_btn.text))
 
--- 2. Người dùng chạm vào nút '🔊 Đọc bằng TTS'
 local played_audio = false
 plugin.tts_client._mock_transport = function(text, voice, done)
     done(true, sample_wav_data)
@@ -237,17 +233,17 @@ plugin.audio_backend.play = function(self, path, on_finish)
     return true
 end
 
-print("  -> Người dùng bấm '🔊 Đọc bằng TTS'...")
+print("  -> User taps '🔊 Đọc bằng TTS'...")
 tts_btn.callback()
 MockKOReader.UIManager:runAllScheduled()
 
-assert(played_audio == true, "LỖI DoD 5.4: Âm thanh đoạn chọn chưa được phát!")
-assert(ui.view.state.page == 1, "LỖI DoD 5.4: Vị trí trang sách bị thay đổi sai trái khi đọc đoạn chọn!")
-print("  -> Đoạn văn bản bôi đen đã được phát âm thanh độc lập thành công.")
-print("  -> Vị trí đọc dở của sách được bảo toàn nguyên vẹn 100%.")
+assert(played_audio == true, "ERROR DoD 5.4: Snippet audio was not played!")
+assert(ui.view.state.page == 1, "ERROR DoD 5.4: Book reading position was altered!")
+print("  -> Selected snippet played independently.")
+print("  -> Book reading progress preserved 100%.")
 
-print("  [KẾT QUẢ DoD 5.4]: PASS - Menu bôi đen văn bản tích hợp hoàn hảo, đọc trọn vẹn đoạn trích.")
+print("  [DoD 5.4 RESULT]: PASS - Text selection hook verified, snippet played without position change.")
 
 print("\n=========================================================================")
-print("  TỔNG KẾT: TẤT CẢ 4 TIÊU CHÍ GIAI ĐOẠN 5 ĐÃ ĐƯỢC NGHIỆM THU 100%!     ")
+print("  SUMMARY: ALL 4 PHASE 5 ACCEPTANCE CRITERIA VERIFIED 100%!               ")
 print("=========================================================================\n")

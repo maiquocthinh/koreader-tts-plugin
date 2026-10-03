@@ -1,11 +1,11 @@
 --[[
-    tests/test_phase5_ui.lua - Bộ kiểm thử độc lập cho Giai đoạn 5 (Phase 5)
-    Kiểm tra:
-      - Bôi sáng câu (Sentence Highlighting) với partial E-ink refresh
-      - Thanh điều khiển nổi neo đáy màn hình (Floating Control Bar)
-      - Chế độ thu nhỏ (Mini Floating Bubble)
-      - Menu bôi đen chữ (Text Selection Hook) & phát đoạn chọn độc lập
-    Chạy trực tiếp qua: luajit tests/test_phase5_ui.lua
+    tests/test_phase5_ui.lua - Standalone unit test suite for Phase 5
+    Validates:
+      - Sentence Highlighting with partial E-ink refresh
+      - Bottom-anchored Floating Control Bar
+      - Mini Floating Bubble mode
+      - Text Selection Hook & standalone selection playback
+    Run via: luajit tests/test_phase5_ui.lua
 --]]
 
 package.path = "./?.lua;./tests/?.lua;" .. package.path
@@ -33,7 +33,7 @@ local function run_test(name, func)
 end
 
 print("==========================================================")
-print("  CHẠY BỘ KIỂM THỬ ĐỘC LẬP - GIAI ĐOẠN 5 (PHASE 5)")
+print("  STANDALONE TEST SUITE - PHASE 5 (NATIVE UI & HIGHLIGHT)")
 print("==========================================================")
 
 -- Helper mock bboxes
@@ -42,8 +42,8 @@ local sample_bboxes = {
     { x = 50, y = 128, w = 250, h = 24 },
 }
 
--- Test 1: Bôi sáng câu ở chế độ gray
-run_test("Highlight: Chế độ gray gọi setHighlight COLOR_GRAY_E & partial", function()
+-- Test 1: Sentence highlighting in gray mode
+run_test("Highlight: Gray mode sets COLOR_GRAY_E & partial dirty", function()
     MockKOReader.UIManager:reset()
     local doc = MockKOReader.createMockCrengineDocument()
     local ui = MockKOReader.createMockUI(doc, 1)
@@ -55,18 +55,18 @@ run_test("Highlight: Chế độ gray gọi setHighlight COLOR_GRAY_E & partial"
 
     player:highlightSentence(sample_bboxes, "gray")
 
-    assert(ui.view._highlight ~= nil, "view._highlight phải được gán")
-    assert(ui.view._highlight_color == _G.Blitbuffer.COLOR_GRAY_E, "Màu highlight phải là COLOR_GRAY_E")
-    assert(#ui.view._highlight == 2, "Phải có 2 bounding boxes")
+    assert(ui.view._highlight ~= nil, "view._highlight must be set")
+    assert(ui.view._highlight_color == _G.Blitbuffer.COLOR_GRAY_E, "Highlight color must be COLOR_GRAY_E")
+    assert(#ui.view._highlight == 2, "Must have 2 bounding boxes")
 
-    -- Kiểm tra partial refresh
-    assert(#MockKOReader.UIManager._dirty_calls >= 1, "Phải gọi UIManager:setDirty")
+    -- Check partial refresh
+    assert(#MockKOReader.UIManager._dirty_calls >= 1, "Must call UIManager:setDirty")
     local last_dirty = MockKOReader.UIManager._dirty_calls[#MockKOReader.UIManager._dirty_calls]
-    assert(last_dirty.refresh_type == "partial", "Chế độ refresh phải là partial (chống chớp E-ink)")
+    assert(last_dirty.refresh_type == "partial", "Refresh type must be partial (prevents E-ink flashing)")
 end)
 
--- Test 2: Bôi sáng câu ở chế độ underline
-run_test("Highlight: Chế độ underline tạo dải viền đáy chữ h=2px", function()
+-- Test 2: Sentence highlighting in underline mode
+run_test("Highlight: Underline mode creates 2px bottom strip", function()
     MockKOReader.UIManager:reset()
     local doc = MockKOReader.createMockCrengineDocument()
     local ui = MockKOReader.createMockUI(doc, 1)
@@ -79,13 +79,13 @@ run_test("Highlight: Chế độ underline tạo dải viền đáy chữ h=2px"
     player:highlightSentence(sample_bboxes, "underline")
 
     assert(ui.view._highlight ~= nil)
-    assert(ui.view._highlight_color == _G.Blitbuffer.COLOR_BLACK, "Gạch chân phải dùng COLOR_BLACK")
-    assert(ui.view._highlight[1].h == 2, "Chiều cao đường gạch chân phải là 2px")
-    assert(ui.view._highlight[1].y == 100 + 24 - 2, "Vị trí y của đường gạch chân phải ở đáy dòng chữ")
+    assert(ui.view._highlight_color == _G.Blitbuffer.COLOR_BLACK, "Underline must use COLOR_BLACK")
+    assert(ui.view._highlight[1].h == 2, "Underline height must be 2px")
+    assert(ui.view._highlight[1].y == 100 + 24 - 2, "Underline y must be at bottom of line")
 end)
 
--- Test 3: Chế độ highlight "none"
-run_test("Highlight: Chế độ none không hiển thị bôi sáng", function()
+-- Test 3: Highlight mode "none"
+run_test("Highlight: None mode renders no highlight", function()
     MockKOReader.UIManager:reset()
     local doc = MockKOReader.createMockCrengineDocument()
     local ui = MockKOReader.createMockUI(doc, 1)
@@ -96,11 +96,11 @@ run_test("Highlight: Chế độ none không hiển thị bôi sáng", function(
     }
 
     player:highlightSentence(sample_bboxes, "none")
-    assert(ui.view._highlight == nil, "Chế độ none không được gán highlight")
+    assert(ui.view._highlight == nil, "None mode must not set highlight")
 end)
 
--- Test 4: Làm sạch highlight khi chuyển câu
-run_test("Highlight: clearHighlight xóa highlight và dirty vùng cũ", function()
+-- Test 4: Clear highlight on sentence change
+run_test("Highlight: clearHighlight cleans highlight & dirties rect", function()
     MockKOReader.UIManager:reset()
     local doc = MockKOReader.createMockCrengineDocument()
     local ui = MockKOReader.createMockUI(doc, 1)
@@ -116,13 +116,13 @@ run_test("Highlight: clearHighlight xóa highlight và dirty vùng cũ", functio
     MockKOReader.UIManager:reset()
     player:clearHighlight()
 
-    assert(ui.view._highlight == nil, "Highlight trên view phải bị xóa")
-    assert(player.current_highlight == nil, "current_highlight phải về nil")
-    assert(#MockKOReader.UIManager._dirty_calls == 1, "Phải gọi partial dirty rect làm sạch vùng cũ")
+    assert(ui.view._highlight == nil, "View highlight must be cleared")
+    assert(player.current_highlight == nil, "current_highlight must be nil")
+    assert(#MockKOReader.UIManager._dirty_calls == 1, "Must trigger partial dirty rect to clean area")
 end)
 
--- Test 5: Tạo cây widget Floating Control Bar
-run_test("Control Bar: Dựng đủ 3 dòng Header, Controls, Footer", function()
+-- Test 5: Floating Control Bar widget tree
+run_test("Control Bar: Constructs Header, Controls, Footer rows", function()
     MockKOReader.UIManager:reset()
     local doc = MockKOReader.createMockCrengineDocument()
     local ui = MockKOReader.createMockUI(doc, 1)
@@ -134,19 +134,19 @@ run_test("Control Bar: Dựng đủ 3 dòng Header, Controls, Footer", function(
 
     player:showControlBar()
 
-    assert(player.control_bar ~= nil, "control_bar phải được khởi tạo")
-    assert(#MockKOReader.UIManager._shown_widgets == 1, "UIManager phải hiển thị control_bar")
-    assert(player.title_widget ~= nil, "Phải có title_widget hiển thị tiến độ")
-    assert(player.play_pause_btn ~= nil, "Phải có play_pause_btn")
-    assert(player.speed_btn ~= nil, "Phải có speed_btn")
-    assert(player.buffer_status_widget ~= nil, "Phải có buffer_status_widget")
+    assert(player.control_bar ~= nil, "control_bar must be created")
+    assert(#MockKOReader.UIManager._shown_widgets == 1, "UIManager must show control_bar")
+    assert(player.title_widget ~= nil, "Must have title_widget for progress")
+    assert(player.play_pause_btn ~= nil, "Must have play_pause_btn")
+    assert(player.speed_btn ~= nil, "Must have speed_btn")
+    assert(player.buffer_status_widget ~= nil, "Must have buffer_status_widget")
 
     player:hideControlBar()
-    assert(player.control_bar == nil, "hideControlBar phải giải phóng widget")
+    assert(player.control_bar == nil, "hideControlBar must release widget")
 end)
 
--- Test 6: Bấm các nút điều hướng trên Control Bar
-run_test("Control Bar: Nút Play/Pause, Next, Prev, Pages gọi queue", function()
+-- Test 6: Control Bar navigation buttons
+run_test("Control Bar: Play/Pause, Next, Prev, Pages call queue", function()
     MockKOReader.UIManager:reset()
     local pages = {
         [1] = "Câu số một của bài test giao diện. Câu số hai của bài test giao diện.",
@@ -191,8 +191,8 @@ run_test("Control Bar: Nút Play/Pause, Next, Prev, Pages gọi queue", function
     assert(player.visible == false)
 end)
 
--- Test 7: Xoay vòng tốc độ đọc qua nút [Tốc độ]
-run_test("Speed: Nút tốc độ xoay vòng 0.8x -> 1.0x -> 1.2x -> 1.5x -> 2.0x", function()
+-- Test 7: Speed button cycling
+run_test("Speed: Cycles 0.8x -> 1.0x -> 1.2x -> 1.5x -> 2.0x", function()
     local storage = MockKOReader.createMockSettings()
     local settings = Settings:new(storage)
     local audio_backend = AudioBackend:new{ speed = 1.0 }
@@ -203,10 +203,10 @@ run_test("Speed: Nút tốc độ xoay vòng 0.8x -> 1.0x -> 1.2x -> 1.5x -> 2.0
     }
     player:showControlBar()
 
-    -- Đang 1.0x -> xoay vòng sang 1.2x
+    -- 1.0x -> cycle to 1.2x
     player:onCycleSpeed()
-    assert(math.abs(audio_backend.speed - 1.2) < 0.01, "Tốc độ audio_backend phải là 1.2x")
-    assert(math.abs(settings:get("speed") - 1.2) < 0.01, "Settings phải lưu 1.2x")
+    assert(math.abs(audio_backend.speed - 1.2) < 0.01, "audio_backend speed must be 1.2x")
+    assert(math.abs(settings:get("speed") - 1.2) < 0.01, "Settings must save 1.2x")
 
     -- 1.2x -> 1.5x
     player:onCycleSpeed()
@@ -216,15 +216,15 @@ run_test("Speed: Nút tốc độ xoay vòng 0.8x -> 1.0x -> 1.2x -> 1.5x -> 2.0
     player:onCycleSpeed()
     assert(math.abs(audio_backend.speed - 2.0) < 0.01)
 
-    -- 2.0x -> quay lại 0.8x
+    -- 2.0x -> wrap back to 0.8x
     player:onCycleSpeed()
     assert(math.abs(audio_backend.speed - 0.8) < 0.01)
 
     player:hide()
 end)
 
--- Test 8: Đèn trạng thái bộ đệm (●●, ●○, ○○)
-run_test("Buffer Status: Đèn đệm hiển thị chính xác theo slots", function()
+-- Test 8: Buffer status indicator (●●, ●○, ○○)
+run_test("Buffer Status: Indicator displays correctly by slots", function()
     local mock_queue = {
         getState = function() return "PLAYING" end,
         getSlot = function(self, offset)
@@ -239,54 +239,54 @@ run_test("Buffer Status: Đèn đệm hiển thị chính xác theo slots", func
     }
     player:showControlBar()
 
-    assert(player.buffer_status_widget.text:find("●●"), "Cả 2 slot READY phải hiện ●●")
+    assert(player.buffer_status_widget.text:find("●●"), "Both slots READY must show ●●")
 
-    -- Chỉ slot 1 READY
+    -- Only slot 1 READY
     mock_queue.getSlot = function(self, offset)
         if offset == 1 then return { status = "READY" } end
         return { status = "FETCHING" }
     end
     player:_updateBufferStatus()
-    assert(player.buffer_status_widget.text:find("●○"), "1 slot READY phải hiện ●○")
+    assert(player.buffer_status_widget.text:find("●○"), "1 slot READY must show ●○")
 
-    -- Chưa có slot nào READY
+    -- No slots READY
     mock_queue.getSlot = function(self, offset)
         return { status = "FETCHING" }
     end
     player:_updateBufferStatus()
-    assert(player.buffer_status_widget.text:find("○○"), "Đang tải phải hiện ○○")
+    assert(player.buffer_status_widget.text:find("○○"), "Loading must show ○○")
 
     player:hide()
 end)
 
--- Test 9: Thu nhỏ thành Mini Bubble và mở rộng lại
-run_test("Mini Bubble: Chuyển đổi qua lại giữa Control Bar và Bubble", function()
+-- Test 9: Mini Floating Bubble toggle
+run_test("Mini Bubble: Toggles between Control Bar and Bubble", function()
     MockKOReader.UIManager:reset()
     local player = UIPlayer:new()
 
-    -- Mở control bar
+    -- Open control bar
     player:show()
     assert(player.is_mini == false)
     assert(player.control_bar ~= nil)
     assert(player.mini_bubble == nil)
 
-    -- Thu nhỏ
+    -- Minimize
     player:toggleMode()
     assert(player.is_mini == true)
-    assert(player.control_bar == nil, "Control bar phải bị đóng khi thu nhỏ")
-    assert(player.mini_bubble ~= nil, "Mini bubble phải được hiển thị")
+    assert(player.control_bar == nil, "Control bar must be closed when minimized")
+    assert(player.mini_bubble ~= nil, "Mini bubble must be shown")
 
-    -- Mở rộng lại
+    -- Restore
     player:toggleMode()
     assert(player.is_mini == false)
-    assert(player.control_bar ~= nil, "Control bar phải được phục hồi")
-    assert(player.mini_bubble == nil, "Mini bubble phải đóng khi phóng to")
+    assert(player.control_bar ~= nil, "Control bar must be restored")
+    assert(player.mini_bubble == nil, "Mini bubble must be closed")
 
     player:hide()
 end)
 
--- Test 10: Chạm icon trên Mini Bubble toggle Play/Pause
-run_test("Mini Bubble: Nút Play/Pause trên Bubble hoạt động chuẩn", function()
+-- Test 10: Mini Bubble Play/Pause icon tap
+run_test("Mini Bubble: Play/Pause button on bubble works", function()
     local toggled = false
     local mock_queue = {
         getState = function() return "PLAYING" end,
@@ -300,32 +300,32 @@ run_test("Mini Bubble: Nút Play/Pause trên Bubble hoạt động chuẩn", fun
 
     assert(player.mini_play_btn ~= nil)
     player.mini_play_btn.callback()
-    assert(toggled == true, "Chạm nút play trên mini bubble phải gọi togglePlayPause")
+    assert(toggled == true, "Tapping play on bubble must call togglePlayPause")
 
     player:hide()
 end)
 
--- Test 11: Hook addToHighlightMenu thêm nút Đọc bằng TTS
-run_test("Selection Hook: addToHighlightMenu thêm nút Đọc bằng TTS", function()
+-- Test 11: addToHighlightMenu hook
+run_test("Selection Hook: addToHighlightMenu adds TTS button", function()
     local plugin = KoreaderTTS:new{
         ui = { menu = {} }
     }
     plugin:init()
 
     local menu_items = {
-        { text = "Đánh dấu" },
-        { text = "Ghi chú" },
+        { text = "Highlight" },
+        { text = "Bookmark" },
     }
 
-    plugin:addToHighlightMenu(menu_items, "Đoạn văn bản được người dùng bôi đen.")
+    plugin:addToHighlightMenu(menu_items, "Selected text snippet by user.")
 
-    assert(#menu_items == 3, "menu_items phải được thêm 1 nút")
-    assert(menu_items[3].text == "🔊 Đọc bằng TTS", "Nút thêm vào phải là '🔊 Đọc bằng TTS'")
-    assert(type(menu_items[3].callback) == "function", "Nút phải có callback")
+    assert(#menu_items == 3, "menu_items must have 1 added item")
+    assert(menu_items[3].text == "🔊 Đọc bằng TTS", "Added button must be '🔊 Đọc bằng TTS'")
+    assert(type(menu_items[3].callback) == "function", "Button must have callback")
 end)
 
--- Test 12: onReadSelectedText phát âm thanh đoạn chọn độc lập
-run_test("Selection Reading: onReadSelectedText phát audio đoạn chọn", function()
+-- Test 12: onReadSelectedText plays selection independently
+run_test("Selection Reading: onReadSelectedText plays audio selection", function()
     MockKOReader.UIManager:reset()
     local doc = MockKOReader.createMockCrengineDocument()
     local ui = MockKOReader.createMockUI(doc, 1)
@@ -343,16 +343,15 @@ run_test("Selection Reading: onReadSelectedText phát audio đoạn chọn", fun
         return true
     end
 
-    local selected_text = "Đây là đoạn văn bản được bôi đen cần đọc."
+    local selected_text = "This is a highlighted snippet to read."
     plugin:onReadSelectedText(selected_text)
 
-    -- Bơm scheduler
     MockKOReader.UIManager:runAllScheduled()
 
-    assert(played_wav ~= nil, "Đoạn văn chọn phải được gửi phát qua audio_backend")
-    assert(ui.view.state.page == 1, "Trang sách hiện tại không được phép thay đổi khi đọc đoạn bôi đen")
+    assert(played_wav ~= nil, "Snippet must be played via audio_backend")
+    assert(ui.view.state.page == 1, "Book page position must remain unchanged")
 end)
 
 print("==========================================================")
-print("  TẤT CẢ 12 BÀI KIỂM THỬ ĐỀU ĐÃ VƯỢT QUA THÀNH CÔNG!     ")
+print("  ALL 12 TESTS PASSED SUCCESSFULLY!                      ")
 print("==========================================================")

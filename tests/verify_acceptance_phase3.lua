@@ -1,11 +1,11 @@
 --[[
     tests/verify_acceptance_phase3.lua
-    Kịch bản kiểm chứng nghiệm thu đầu-cuối (E2E Acceptance Verification) cho Giai đoạn 3 (Phase 3)
-    Kiểm chứng toàn diện 3 tiêu chí Definition of Done (DoD):
-      - DoD 3.1: HTTP Client non-blocking tải file WAV về cache, giao diện không bị giật/đơ
-      - DoD 3.2: Lớp phát âm thanh đa nền tảng AudioBackend, gọi callback chính xác khi hết bài
-      - DoD 3.3: Tích hợp toàn trình End-to-End: Document -> TextChunker -> TTSClient -> AudioBackend -> Callback
-      - Hỗ trợ cờ --live: Kiểm thử kết nối máy chủ thật với endpoint và giọng đọc trong memory
+    End-to-End Acceptance Verification script for Phase 3
+    Validates 3 Definition of Done (DoD) criteria:
+      - DoD 3.1: Non-blocking HTTP Client downloads WAV to cache without UI freeze
+      - DoD 3.2: Multi-platform AudioBackend plays audio and triggers completion callback
+      - DoD 3.3: End-to-End integration: Document -> TextChunker -> TTSClient -> AudioBackend -> Callback
+      - Optional --live flag: live TTS server connection test using memory credentials
 --]]
 
 package.path = "./?.lua;./tests/?.lua;" .. package.path
@@ -20,10 +20,10 @@ local KoreaderTTS = require("main")
 local Settings = require("settings")
 
 local function step_banner(num, title)
-    print(string.format("\n=== [BƯỚC %d] %s ===", num, title))
+    print(string.format("\n=== [STEP %d] %s ===", num, title))
 end
 
---- Hàm tạo chuỗi nhị phân WAV hợp lệ phục vụ kiểm thử nghiệm thu
+--- Helper function to generate valid WAV bytes for acceptance test
 local function create_sample_wav_bytes(duration_seconds, sample_rate)
     sample_rate = sample_rate or 24000
     local channels = 1
@@ -65,9 +65,9 @@ local function create_sample_wav_bytes(duration_seconds, sample_rate)
 end
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 3.1: HTTP Client Non-blocking tải WAV về cache
+-- VERIFY DoD 3.1: Non-blocking HTTP Client downloads WAV to cache
 -- =========================================================================
-step_banner(1, "Kiểm chứng DoD 3.1: Tải file WAV Non-blocking & Lưu trữ Cache")
+step_banner(1, "Verify DoD 3.1: Non-blocking WAV Download & Cache Persistence")
 
 MockKOReader.UIManager:reset()
 local sample_wav_data = create_sample_wav_bytes(1.2, 24000)
@@ -76,7 +76,6 @@ local test_text = "Hôm nay tôi đọc sách trên thiết bị màn hình E-in
 local tts_client = TTSClient:new{
     cache_dir = "cache/tts_acceptance",
     _mock_transport = function(text, voice, done)
-        -- Giả lập độ trễ mạng nhưng không khóa luồng
         done(true, sample_wav_data)
     end
 }
@@ -84,40 +83,39 @@ local tts_client = TTSClient:new{
 local download_success = nil
 local downloaded_path = nil
 
-print("  -> Bắt đầu gọi fetchSpeechAsync bất đồng bộ...")
+print("  -> Calling fetchSpeechAsync asynchronously...")
 tts_client:fetchSpeechAsync(test_text, function(success, result)
     download_success = success
     downloaded_path = result
 end)
 
--- Kiểm tra UI không bị khóa: có thể xử lý các tác vụ khác trong lúc chờ
+-- Verify UI thread is not blocked
 local ui_events_processed = 0
 MockKOReader.UIManager:scheduleIn(0.01, function()
     ui_events_processed = ui_events_processed + 1
 end)
 
--- Bơm scheduler
 MockKOReader.UIManager:runAllScheduled()
 
-assert(download_success == true, "LỖI DoD 3.1: Tải âm thanh thất bại!")
-assert(downloaded_path ~= nil, "LỖI DoD 3.1: Không có đường dẫn file trả về!")
-assert(ui_events_processed >= 1, "LỖI DoD 3.1: Vòng lặp UI bị chặn không thể xử lý sự kiện cảm ứng!")
+assert(download_success == true, "ERROR DoD 3.1: Audio download failed!")
+assert(downloaded_path ~= nil, "ERROR DoD 3.1: No file path returned!")
+assert(ui_events_processed >= 1, "ERROR DoD 3.1: UI event loop was blocked!")
 
--- Kiểm tra file WAV trên đĩa
+-- Check WAV file on disk
 local f = io.open(downloaded_path, "rb")
-assert(f ~= nil, "LỖI DoD 3.1: File WAV không được tạo trên đĩa!")
+assert(f ~= nil, "ERROR DoD 3.1: WAV file was not created on disk!")
 local magic = f:read(4)
 f:close()
-assert(magic == "RIFF", "LỖI DoD 3.1: Header file không đúng chuẩn RIFF/WAV!")
+assert(magic == "RIFF", "ERROR DoD 3.1: Header magic is not RIFF/WAV!")
 
-print(string.format("  -> Đã tải thành công file WAV về: '%s'", downloaded_path))
-print(string.format("  -> Xác thực Header file: '%s' hợp lệ, dung lượng > 0 byte.", magic))
-print("  [KẾT QUẢ DoD 3.1]: PASS - Tải file WAV non-blocking thành công, UI không bị treo.")
+print(string.format("  -> Successfully downloaded WAV to: '%s'", downloaded_path))
+print(string.format("  -> Header verified: '%s' valid, size > 0 bytes.", magic))
+print("  [DoD 3.1 RESULT]: PASS - Non-blocking WAV download verified, UI responsive.")
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 3.2: Tầng phát âm thanh đa nền tảng AudioBackend
+-- VERIFY DoD 3.2: Multi-platform AudioBackend
 -- =========================================================================
-step_banner(2, "Kiểm chứng DoD 3.2: Lớp phát âm thanh đa nền tảng & Callback hoàn tất")
+step_banner(2, "Verify DoD 3.2: Multi-platform AudioBackend & Callback Trigger")
 
 MockKOReader.UIManager:reset()
 local audio_backend = AudioBackend:new{
@@ -125,33 +123,32 @@ local audio_backend = AudioBackend:new{
     speed = 1.0,
 }
 
--- Tính toán thời lượng file
 local duration, byte_rate, sample_rate = AudioBackend.getWavDuration(downloaded_path)
-print(string.format("  -> Phân tích file WAV: Sample rate = %d Hz | Byte rate = %d B/s | Thời lượng = %.2f giây",
+print(string.format("  -> WAV parsing: Sample rate = %d Hz | Byte rate = %d B/s | Duration = %.2f s",
     sample_rate, byte_rate, duration))
-assert(duration > 1.0 and duration < 1.4, "LỖI DoD 3.2: Tính sai thời lượng WAV!")
+assert(duration > 1.0 and duration < 1.4, "ERROR DoD 3.2: Incorrect duration calculation!")
 
 local playback_finished = false
-print("  -> Bắt đầu phát âm thanh qua AudioBackend:play()...")
+print("  -> Playing audio via AudioBackend:play()...")
 audio_backend:play(downloaded_path, function(success)
     playback_finished = success
 end)
 
-assert(audio_backend:isPlaying() == true, "LỖI DoD 3.2: AudioBackend chưa chuyển sang trạng thái isPlaying!")
+assert(audio_backend:isPlaying() == true, "ERROR DoD 3.2: AudioBackend isPlaying not set!")
 
--- Mô phỏng thời gian phát trôi qua (1.3 giây)
+-- Simulate 1.3 seconds playback time
 MockKOReader.UIManager:tick(1.3)
 
-assert(playback_finished == true, "LỖI DoD 3.2: Callback on_finished không được gọi khi hết bài!")
-assert(audio_backend:isPlaying() == false, "LỖI DoD 3.2: Sau khi phát xong cờ isPlaying phải về false!")
+assert(playback_finished == true, "ERROR DoD 3.2: on_finished callback not called!")
+assert(audio_backend:isPlaying() == false, "ERROR DoD 3.2: isPlaying not reset after completion!")
 
-print("  -> Callback hoàn tất phiên phát đã được kích hoạt chính xác.")
-print("  [KẾT QUẢ DoD 3.2]: PASS - Driver phát âm thanh mượt mà và gọi callback đúng thời điểm.")
+print("  -> Playback completion callback triggered accurately.")
+print("  [DoD 3.2 RESULT]: PASS - Audio driver completed playback and triggered callback.")
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 3.3: Tích hợp End-to-End câu đơn lẻ trên giao diện KOReader
+-- VERIFY DoD 3.3: End-to-End Single Sentence Playback on KOReader UI
 -- =========================================================================
-step_banner(3, "Kiểm chứng DoD 3.3: Toàn trình End-to-End (Document -> API -> Loa)")
+step_banner(3, "Verify DoD 3.3: End-to-End Single Sentence (Doc -> API -> Audio)")
 
 MockKOReader.UIManager:reset()
 local sample_page_text = "Chào mừng bạn đến với KOReader. Đây là câu thử nghiệm tính năng đọc bằng giọng nói của Phase 3."
@@ -165,45 +162,39 @@ local plugin = KoreaderTTS:new{
 }
 plugin:init()
 
--- Đặt mock transport cho plugin tts_client để chạy test E2E offline
 plugin.tts_client._mock_transport = function(text, voice, done)
     done(true, sample_wav_data)
 end
 plugin.audio_backend.driver_name = "desktop"
 
-print("  -> Kích hoạt chức năng 'Phát thử 1 câu' từ Menu...")
+print("  -> Triggering 'Test single sentence' from Menu...")
 plugin:onTestSingleSentence()
 
--- Kiểm tra thông báo hiển thị đang tải
-assert(#MockKOReader.UIManager._shown_widgets >= 1, "LỖI DoD 3.3: Không hiển thị thông báo tải!")
+assert(#MockKOReader.UIManager._shown_widgets >= 1, "ERROR DoD 3.3: Loading notice not displayed!")
 local msg1 = MockKOReader.UIManager._shown_widgets[1]
 print(string.format("  -> Toast 1: '%s'", msg1.text:gsub("\n", " - ")))
-assert(msg1.text:find("Đang tải"), "LỖI DoD 3.3: Chưa báo đang tải âm thanh!")
+assert(msg1.text:find("Đang tải") or msg1.text:find("Loading"), "ERROR DoD 3.3: Missing loading toast!")
 
--- Bơm scheduler để hoàn thành việc tải và bắt đầu phát
 MockKOReader.UIManager:tick(0.1)
 
--- Kiểm tra thông báo đang phát
 local msg2 = MockKOReader.UIManager._shown_widgets[#MockKOReader.UIManager._shown_widgets]
 print(string.format("  -> Toast 2: '%s'", msg2.text:gsub("\n", " - ")))
-assert(msg2.text:find("Đang phát"), "LỖI DoD 3.3: Chưa báo đang phát câu!")
-assert(plugin.audio_backend:isPlaying() == true, "LỖI DoD 3.3: Backend chưa phát âm thanh!")
+assert(msg2.text:find("Đang phát") or msg2.text:find("Playing"), "ERROR DoD 3.3: Missing playing toast!")
+assert(plugin.audio_backend:isPlaying() == true, "ERROR DoD 3.3: Audio backend not playing!")
 
--- Cho âm thanh phát hết
 MockKOReader.UIManager:tick(1.5)
-assert(plugin.audio_backend:isPlaying() == false, "LỖI DoD 3.3: Backend chưa dừng sau khi phát xong!")
+assert(plugin.audio_backend:isPlaying() == false, "ERROR DoD 3.3: Backend did not stop after playback!")
 
 local msg3 = MockKOReader.UIManager._shown_widgets[#MockKOReader.UIManager._shown_widgets]
 print(string.format("  -> Toast 3: '%s'", msg3.text))
-assert(msg3.text:find("Đã phát xong"), "LỖI DoD 3.3: Chưa báo phát xong câu!")
+assert(msg3.text:find("Đã phát xong") or msg3.text:find("Finished"), "ERROR DoD 3.3: Missing completion toast!")
 
-print("  [KẾT QUẢ DoD 3.3]: PASS - Toàn trình End-to-End câu đơn lẻ hoạt động trơn tru 100%.")
+print("  [DoD 3.3 RESULT]: PASS - End-to-End single sentence playback verified 100%.")
 
--- Dọn dẹp file test
 os.remove(downloaded_path)
 
 -- =========================================================================
--- KIỂM CHỨNG TÙY CHỌN: KẾT NỐI SERVER THẬT (LIVE SERVER TEST)
+-- OPTIONAL: LIVE TTS SERVER CONNECTION TEST
 -- =========================================================================
 local is_live_test = false
 for _, arg in ipairs(arg or {}) do
@@ -211,8 +202,8 @@ for _, arg in ipairs(arg or {}) do
 end
 
 if is_live_test then
-    step_banner(4, "Kiểm chứng Tùy chọn: Kết nối Máy chủ TTS Thực tế (Live VieNeu Server)")
-    print("  -> Đang kết nối tới máy chủ live được cấu hình trong memory...")
+    step_banner(4, "Optional Check: Connect to Live TTS Server")
+    print("  -> Connecting to live server configured in memory...")
 
     local live_client = TTSClient:new{
         server_url = "https://maiquocthinh-vieneu-tts.hf.space/v1/audio/speech",
@@ -231,7 +222,6 @@ if is_live_test then
         live_res = res
     end)
 
-    -- Chạy scheduler chờ live download
     local max_wait = 250
     while not live_done and max_wait > 0 do
         max_wait = max_wait - 1
@@ -239,15 +229,15 @@ if is_live_test then
     end
 
     if live_ok then
-        print(string.format("  -> [LIVE PASS]: Tải thành công từ server thật! File: %s", live_res))
+        print(string.format("  -> [LIVE PASS]: Successfully downloaded from live server! File: %s", live_res))
         local live_dur = AudioBackend.getWavDuration(live_res)
-        print(string.format("  -> Thời lượng âm thanh từ server: %.2f giây", live_dur))
+        print(string.format("  -> Audio duration from server: %.2f s", live_dur))
         os.remove(live_res)
     else
-        print(string.format("  -> [LIVE NOTICE]: Không thể kết nối server live (có thể do mạng/timeout): %s", tostring(live_res)))
+        print(string.format("  -> [LIVE NOTICE]: Cannot connect to live server: %s", tostring(live_res)))
     end
 end
 
 print("\n=========================================================================")
-print("  TỔNG KẾT: TẤT CẢ 3 TIÊU CHÍ GIAI ĐOẠN 3 ĐÃ ĐƯỢC NGHIỆM THU 100%!     ")
+print("  SUMMARY: ALL 3 PHASE 3 ACCEPTANCE CRITERIA VERIFIED 100%!               ")
 print("=========================================================================\n")

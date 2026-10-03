@@ -1,9 +1,8 @@
 --[[
-    tests/test_phase1_settings.lua - Bộ tự kiểm tra độc lập cho Phase 1
-    Chạy trực tiếp qua: luajit tests/test_phase1_settings.lua
+    tests/test_phase1_settings.lua - Standalone unit test suite for Phase 1
+    Run via: luajit tests/test_phase1_settings.lua
 --]]
 
--- Thêm thư mục hiện tại vào package.path
 package.path = "./?.lua;./tests/?.lua;" .. package.path
 
 local MockKOReader = require("mock_koreader")
@@ -25,21 +24,21 @@ local function run_test(name, func)
 end
 
 print("==========================================================")
-print("  CHẠY BỘ KIỂM THỬ ĐỘC LẬP - GIAI ĐOẠN 1 (PHASE 1)")
+print("  STANDALONE TEST SUITE - PHASE 1 (SETTINGS & FOUNDATION)")
 print("==========================================================")
 
--- Test 1: Kiểm tra metadata plugin
-run_test("Metadata _meta.lua hợp lệ", function()
-    assert(type(meta) == "table", "_meta.lua phải trả về table")
-    assert(meta.name == "koreader_tts", "name phải là koreader_tts")
-    assert(meta.category == "read", "category phải là read")
-    assert(type(meta.fullname) == "string", "fullname phải là string")
-    assert(type(meta.description) == "string", "description phải là string")
-    assert(meta.version == "0.1.0", "version phải là 0.1.0")
+-- Test 1: Plugin metadata validation
+run_test("Metadata _meta.lua valid", function()
+    assert(type(meta) == "table", "_meta.lua must return table")
+    assert(meta.name == "koreader_tts", "name must be koreader_tts")
+    assert(meta.category == "read", "category must be read")
+    assert(type(meta.fullname) == "string", "fullname must be string")
+    assert(type(meta.description) == "string", "description must be string")
+    assert(meta.version == "0.1.0", "version must be 0.1.0")
 end)
 
--- Test 2: Khởi tạo với Default Settings
-run_test("Khởi tạo Settings mặc định đầy đủ", function()
+-- Test 2: Default settings initialization
+run_test("Initialize default settings schema", function()
     local storage = MockKOReader.createMockSettings()
     local s = Settings:new(storage)
 
@@ -60,13 +59,13 @@ run_test("Khởi tạo Settings mặc định đầy đủ", function()
     assert(s:get("last_chunk_index") == 1)
 end)
 
--- Test 3: Đọc/ghi cấu hình (set/get)
-run_test("Đọc/ghi giá trị hợp lệ", function()
+-- Test 3: Read/write valid settings
+run_test("Read/write valid setting values", function()
     local storage = MockKOReader.createMockSettings()
     local s = Settings:new(storage)
 
     local ok = s:set("server_url", "http://10.0.0.5:8000")
-    assert(ok == true, "set server_url phải thành công")
+    assert(ok == true, "set server_url must succeed")
     assert(s:get("server_url") == "http://10.0.0.5:8000")
 
     ok = s:set("voice", "vi-VN-NuMaiPhuong")
@@ -78,60 +77,60 @@ run_test("Đọc/ghi giá trị hợp lệ", function()
     assert(math.abs(s:get("speed") - 1.25) < 0.001)
 end)
 
--- Test 4: Ràng buộc biên độ & Chuẩn hóa dữ liệu (Clamping & Normalization)
-run_test("Kiểm tra Clamping và loại bỏ slash cuối URL", function()
+-- Test 4: Range clamping & data normalization
+run_test("Bounds clamping & trailing slash removal", function()
     local storage = MockKOReader.createMockSettings()
     local s = Settings:new(storage)
 
     -- Speed clamping [0.5, 2.0]
     s:set("speed", 0.1)
-    assert(s:get("speed") == 0.5, "speed < 0.5 phải bị clamp về 0.5")
+    assert(s:get("speed") == 0.5, "speed < 0.5 must clamp to 0.5")
     s:set("speed", 5.0)
-    assert(s:get("speed") == 2.0, "speed > 2.0 phải bị clamp về 2.0")
+    assert(s:get("speed") == 2.0, "speed > 2.0 must clamp to 2.0")
 
     -- Preload count clamping [1, 3]
     s:set("preload_count", 0)
-    assert(s:get("preload_count") == 1, "preload_count < 1 phải bị clamp về 1")
+    assert(s:get("preload_count") == 1, "preload_count < 1 must clamp to 1")
     s:set("preload_count", 10)
-    assert(s:get("preload_count") == 3, "preload_count > 3 phải bị clamp về 3")
+    assert(s:get("preload_count") == 3, "preload_count > 3 must clamp to 3")
 
     -- Timeout clamping [2, 60]
     s:set("request_timeout", 1)
-    assert(s:get("request_timeout") == 2, "timeout < 2 phải clamp về 2")
+    assert(s:get("request_timeout") == 2, "timeout < 2 must clamp to 2")
     s:set("request_timeout", 120)
-    assert(s:get("request_timeout") == 60, "timeout > 60 phải clamp về 60")
+    assert(s:get("request_timeout") == 60, "timeout > 60 must clamp to 60")
 
-    -- Server URL trailing slash removal
+    -- Trailing slash removal
     s:set("server_url", "http://my-tts-server.local:7860///")
-    assert(s:get("server_url") == "http://my-tts-server.local:7860", "Dấu slash cuối URL phải được loại bỏ")
+    assert(s:get("server_url") == "http://my-tts-server.local:7860", "Trailing slashes must be stripped")
 end)
 
--- Test 5: Từ chối giá trị không hợp lệ (Type & Enum safety)
-run_test("Từ chối kiểu dữ liệu sai hoặc enum không cho phép", function()
+-- Test 5: Rejection of invalid types and enums
+run_test("Reject invalid types or unallowed enum values", function()
     local storage = MockKOReader.createMockSettings()
     local s = Settings:new(storage)
 
-    -- Sai type
-    local ok, err = s:set("speed", "nhanh")
-    assert(ok == false, "Phải từ chối string cho speed")
+    -- Type mismatch
+    local ok, err = s:set("speed", "fast")
+    assert(ok == false, "Must reject string for speed")
 
-    ok, err = s:set("preload_cross_page", "co")
-    assert(ok == false, "Phải từ chối string cho boolean")
+    ok, err = s:set("preload_cross_page", "yes")
+    assert(ok == false, "Must reject string for boolean")
 
-    -- Sai enum
+    -- Invalid enum
     ok, err = s:set("audio_backend", "invalid_backend")
-    assert(ok == false, "Phải từ chối backend lạ")
+    assert(ok == false, "Must reject unknown audio_backend")
 
     ok, err = s:set("highlight_mode", "rainbow")
-    assert(ok == false, "Phải từ chối highlight_mode lạ")
+    assert(ok == false, "Must reject unknown highlight_mode")
 
-    -- Key không tồn tại
+    -- Non-existent key
     ok, err = s:set("non_existent_key", 123)
-    assert(ok == false, "Phải từ chối key không có trong schema")
+    assert(ok == false, "Must reject unknown schema key")
 end)
 
--- Test 6: Lưu trữ và khôi phục (Persistence)
-run_test("Lưu vào storage và tải lại nguyên vẹn", function()
+-- Test 6: Persistence to storage
+run_test("Persist to storage and reload intact", function()
     local storage = MockKOReader.createMockSettings()
     local s1 = Settings:new(storage)
 
@@ -140,10 +139,9 @@ run_test("Lưu vào storage và tải lại nguyên vẹn", function()
     s1:set("speed", 1.5)
     s1:set("preload_count", 3)
     local save_ok = s1:save()
-    assert(save_ok == true, "save() phải thành công")
-    assert(storage._saved == true, "storage phải ghi nhận đã save")
+    assert(save_ok == true, "save() must succeed")
+    assert(storage._saved == true, "storage must register saved")
 
-    -- Khởi tạo instance s2 từ cùng storage
     local s2 = Settings:new(storage)
     assert(s2:get("server_url") == "http://192.168.1.50:5000")
     assert(s2:get("voice") == "vi-VN-Custom")
@@ -151,8 +149,8 @@ run_test("Lưu vào storage và tải lại nguyên vẹn", function()
     assert(s2:get("preload_count") == 3)
 end)
 
--- Test 7: Phục hồi khi dữ liệu trong storage bị thiếu hoặc sai lệch
-run_test("Khôi phục an toàn khi storage chứa dữ liệu bẩn", function()
+-- Test 7: Safe recovery from corrupt storage
+run_test("Safe recovery when storage contains corrupt data", function()
     local corrupted_storage = MockKOReader.createMockSettings({
         [Settings.SETTING_KEY] = {
             server_url = "http://corrupted.local:7860",
@@ -161,14 +159,14 @@ run_test("Khôi phục an toàn khi storage chứa dữ liệu bẩn", function(
     })
 
     local s = Settings:new(corrupted_storage)
-    assert(s:get("server_url") == "http://corrupted.local:7860", "Trường hợp lệ phải được giữ lại")
-    assert(s:get("speed") == 1.0, "Trường bị hỏng kiểu phải fallback về mặc định an toàn")
-    assert(s:get("voice") == "vi-VN-NamMinh", "Trường thiếu phải tự động lấy giá trị mặc định")
-    assert(s:get("preload_count") == 2, "Trường thiếu phải tự động lấy giá trị mặc định")
+    assert(s:get("server_url") == "http://corrupted.local:7860", "Valid fields must be preserved")
+    assert(s:get("speed") == 1.0, "Corrupted type must fallback to safe default")
+    assert(s:get("voice") == "vi-VN-NamMinh", "Missing fields must take default")
+    assert(s:get("preload_count") == 2, "Missing fields must take default")
 end)
 
--- Test 8: Khôi phục cấu hình về mặc định (resetDefaults)
-run_test("resetDefaults() khôi phục tất cả cài đặt", function()
+-- Test 8: Reset to defaults
+run_test("resetDefaults() restores all default values", function()
     local storage = MockKOReader.createMockSettings()
     local s = Settings:new(storage)
 
@@ -180,24 +178,24 @@ run_test("resetDefaults() khôi phục tất cả cài đặt", function()
     assert(s:get("server_url") == "http://192.168.1.100:7860")
 end)
 
--- Test 9: An toàn chống Crash (Crash-proof pcall test)
-run_test("Crash-proof: Không sập khi storage ném exception", function()
+-- Test 9: Crash-proof pcall test
+run_test("Crash-proof: No crash on storage I/O exception", function()
     local faulty_storage = {
         readSetting = function() error("Disk read I/O error!") end,
         saveSetting = function() error("Disk write I/O error!") end,
     }
 
     local s = Settings:new(faulty_storage)
-    assert(s ~= nil, "new() phải thành công ngay cả khi storage read bị lỗi")
-    assert(s:get("server_url") == "http://192.168.1.100:7860", "Phải fallback về default an toàn")
+    assert(s ~= nil, "new() must succeed even if readSetting throws")
+    assert(s:get("server_url") == "http://192.168.1.100:7860", "Must fallback to safe defaults")
 
     local ok, err = s:save()
-    assert(ok == false, "save() phải trả về false")
-    assert(type(err) == "string", "save() phải trả về chuỗi thông báo lỗi")
+    assert(ok == false, "save() must return false on error")
+    assert(type(err) == "string", "save() must return error message string")
 end)
 
--- Test 10: Tích hợp Top Menu chính trong main.lua (Task 1.3)
-run_test("Hook addToMainMenu đăng ký mục menu hợp lệ", function()
+-- Test 10: Top menu integration hook
+run_test("Hook addToMainMenu registers menu item", function()
     local plugin = KoreaderTTS:new{
         ui = {
             menu = {
@@ -210,14 +208,14 @@ run_test("Hook addToMainMenu đăng ký mục menu hợp lệ", function()
     local menu_items = {}
     plugin:addToMainMenu(menu_items)
 
-    assert(menu_items.koreader_tts ~= nil, "menu_items phải chứa koreader_tts")
+    assert(menu_items.koreader_tts ~= nil, "menu_items must contain koreader_tts")
     assert(menu_items.koreader_tts.text == "Đọc bằng giọng nói (TTS)")
     assert(type(menu_items.koreader_tts.sub_item_table) == "table")
     assert(#menu_items.koreader_tts.sub_item_table >= 2)
 end)
 
--- Test 11: Mở hộp thoại cài đặt showSettingsDialog (Task 1.3)
-run_test("showSettingsDialog mở ButtonDialog thành công", function()
+-- Test 11: Settings dialog opening
+run_test("showSettingsDialog opens ButtonDialog successfully", function()
     MockKOReader.UIManager:reset()
     local plugin = KoreaderTTS:new{
         ui = { menu = {} }
@@ -226,13 +224,13 @@ run_test("showSettingsDialog mở ButtonDialog thành công", function()
 
     plugin:showSettingsDialog()
 
-    assert(#MockKOReader.UIManager._shown_widgets == 1, "Phải mở 1 dialog hiển thị")
-    assert(plugin.settings_dialog ~= nil, "plugin.settings_dialog phải được gán")
+    assert(#MockKOReader.UIManager._shown_widgets == 1, "Must show 1 dialog widget")
+    assert(plugin.settings_dialog ~= nil, "plugin.settings_dialog must be set")
     assert(plugin.settings_dialog.title == "Cài đặt TTS Plugin")
 end)
 
--- Test 12: Kích hoạt onStartTTS hiển thị thông báo
-run_test("onStartTTS hiển thị InfoMessage không blocking", function()
+-- Test 12: onStartTTS triggering info message
+run_test("onStartTTS displays non-blocking InfoMessage", function()
     MockKOReader.UIManager:reset()
     local plugin = KoreaderTTS:new{
         ui = { menu = {} }
@@ -241,11 +239,11 @@ run_test("onStartTTS hiển thị InfoMessage không blocking", function()
 
     plugin:onStartTTS()
 
-    assert(#MockKOReader.UIManager._shown_widgets == 1, "Phải hiển thị InfoMessage")
+    assert(#MockKOReader.UIManager._shown_widgets == 1, "Must show InfoMessage")
     local msg = MockKOReader.UIManager._shown_widgets[1]
-    assert(msg.text ~= nil and string.find(msg.text, "VieNeu TTS Plugin"), "Thông báo phải chứa nội dung trạng thái")
+    assert(msg.text ~= nil and string.find(msg.text, "TTS Plugin"), "Notice must contain plugin status")
 end)
 
 print("==========================================================")
-print("  TẤT CẢ 12 BÀI KIỂM THỬ ĐỀU ĐÃ VƯỢT QUA THÀNH CÔNG!     ")
+print("  ALL 12 TESTS PASSED SUCCESSFULLY!                      ")
 print("==========================================================")

@@ -1,10 +1,10 @@
 --[[
     tests/verify_acceptance_phase1.lua
-    Kịch bản kiểm chứng nghiệm thu đầu-cuối (E2E Acceptance Verification) cho Phase 1
-    Mô phỏng chính xác chu kỳ hoạt động thực tế của KOReader:
-      1. Quét nạp Plugin qua _meta.lua & main.lua (DoD 1.1)
-      2. Mở sách, nạp menu Đọc sách, kích hoạt dialog cài đặt, sửa Server URL (DoD 1.3)
-      3. Tắt ứng dụng, khởi động lại KOReader từ file lưu trữ thực tế, kiểm tra tính toàn vẹn (DoD 1.2)
+    End-to-End Acceptance Verification script for Phase 1
+    Simulates real KOReader lifecycle:
+      1. Scan & load plugin via _meta.lua & main.lua (DoD 1.1)
+      2. Open book, register ReaderMenu, open settings dialog, edit Server URL (DoD 1.3)
+      3. Close app, restart KOReader from persistent storage, verify integrity (DoD 1.2)
 --]]
 
 package.path = "./?.lua;./tests/?.lua;" .. package.path
@@ -13,31 +13,31 @@ local MockKOReader = require("mock_koreader")
 MockKOReader.installGlobals()
 
 local function step_banner(num, title)
-    print(string.format("\n=== [BƯỚC %d] %s ===", num, title))
+    print(string.format("\n=== [STEP %d] %s ===", num, title))
 end
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 1.1: KOReader Plugin Management quét thấy và nạp plugin
+-- VERIFY DoD 1.1: KOReader Plugin Management discovers and loads plugin
 -- =========================================================================
-step_banner(1, "Kiểm chứng DoD 1.1: Quét & Nạp Plugin vào KOReader")
+step_banner(1, "Verify DoD 1.1: Plugin Discovery & Loading in KOReader")
 
--- 1. KOReader quét nạp file metadata
+-- 1. Load metadata file
 local meta_chunk, meta_err = loadfile("_meta.lua")
-assert(meta_chunk, "LỖI: Không thể đọc file _meta.lua: " .. tostring(meta_err))
+assert(meta_chunk, "ERROR: Cannot read _meta.lua: " .. tostring(meta_err))
 local meta = meta_chunk()
-assert(type(meta) == "table", "LỖI: _meta.lua không trả về bảng thông tin!")
-assert(meta.name == "koreader_tts", "LỖI: Tên plugin không đúng chuẩn koreader_tts")
-assert(meta.category == "read", "LỖI: Danh mục plugin phải là 'read'")
-print(string.format("  -> Metadata hợp lệ: Plugin '%s' | Tên: '%s' | Nhóm: '%s'", meta.name, meta.fullname, meta.category))
+assert(type(meta) == "table", "ERROR: _meta.lua did not return table!")
+assert(meta.name == "koreader_tts", "ERROR: Invalid plugin name")
+assert(meta.category == "read", "ERROR: Plugin category must be 'read'")
+print(string.format("  -> Valid metadata: Plugin '%s' | Name: '%s' | Category: '%s'", meta.name, meta.fullname, meta.category))
 
--- 2. KOReader nạp main.lua
+-- 2. Load main.lua
 local main_chunk, main_err = loadfile("main.lua")
-assert(main_chunk, "LỖI: Không thể nạp file main.lua: " .. tostring(main_err))
+assert(main_chunk, "ERROR: Cannot load main.lua: " .. tostring(main_err))
 local PluginClass = main_chunk()
-assert(type(PluginClass) == "table", "LỖI: main.lua không trả về class plugin!")
-print("  -> Nạp thành công main.lua, kế thừa WidgetContainer chuẩn.")
+assert(type(PluginClass) == "table", "ERROR: main.lua did not return plugin class!")
+print("  -> Successfully loaded main.lua, inherits from WidgetContainer.")
 
--- Khởi tạo môi trường giả lập KOReader Reader UI
+-- Initialize mock KOReader Reader UI
 local persistent_storage = MockKOReader.createMockSettings()
 _G.G_reader_settings = persistent_storage
 
@@ -49,83 +49,83 @@ local plugin_instance = PluginClass:new{
     }
 }
 plugin_instance:init()
-assert(plugin_instance.settings ~= nil, "LỖI: Plugin chưa khởi tạo module settings!")
-print("  [KẾT QUẢ DoD 1.1]: PASS - KOReader nhận diện và khởi tạo plugin thành công.")
+assert(plugin_instance.settings ~= nil, "ERROR: Plugin failed to initialize settings module!")
+print("  [DoD 1.1 RESULT]: PASS - KOReader recognized and initialized plugin successfully.")
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 1.3: Tích hợp Top Menu & Thao tác Hộp thoại Cài đặt
+-- VERIFY DoD 1.3: Top Menu Integration & Settings Dialog Manipulation
 -- =========================================================================
-step_banner(2, "Kiểm chứng DoD 1.3: Chạm Menu, Mở Dialog và Sửa Cấu Hình")
+step_banner(2, "Verify DoD 1.3: Tap Menu, Open Dialog, and Edit Configuration")
 
--- 1. Tạo thanh menu của KOReader và gọi hook addToMainMenu
+-- 1. Build KOReader reader menu and call addToMainMenu
 local reader_menu = {}
 plugin_instance:addToMainMenu(reader_menu)
-assert(reader_menu.koreader_tts ~= nil, "LỖI: Mục 'koreader_tts' chưa được thêm vào menu đọc sách!")
-print(string.format("  -> Menu hiển thị: '%s'", reader_menu.koreader_tts.text))
+assert(reader_menu.koreader_tts ~= nil, "ERROR: 'koreader_tts' not added to reader menu!")
+print(string.format("  -> Menu item: '%s'", reader_menu.koreader_tts.text))
 
--- 2. Kiểm tra các menu con
+-- 2. Check sub-menu items
 local sub_items = reader_menu.koreader_tts.sub_item_table
-assert(#sub_items >= 2, "LỖI: Thiếu mục menu con!")
+assert(#sub_items >= 2, "ERROR: Missing sub-menu items!")
 for idx, item in ipairs(sub_items) do
-    print(string.format("  -> Menu con %d: '%s'", idx, item.text))
+    print(string.format("  -> Sub-item %d: '%s'", idx, item.text))
 end
 
--- 3. Người dùng chạm vào mục '⚙ Cài đặt máy chủ & Giọng đọc...'
+-- 3. Simulate user tapping settings menu item
 MockKOReader.UIManager:reset()
 local settings_menu_item = nil
 for _, item in ipairs(sub_items) do
-    if item.text:find("Cài đặt") then
+    if item.text:find("Cài đặt") or item.text:find("Settings") then
         settings_menu_item = item
         break
     end
 end
-assert(settings_menu_item ~= nil, "LỖI: Không tìm thấy mục menu Cài đặt!")
+assert(settings_menu_item ~= nil, "ERROR: Settings menu item not found!")
 settings_menu_item.callback()
 
-assert(#MockKOReader.UIManager._shown_widgets >= 1, "LỖI: Không có widget nào được hiển thị qua UIManager!")
+assert(#MockKOReader.UIManager._shown_widgets >= 1, "ERROR: No widget shown via UIManager!")
 local settings_dialog = plugin_instance.settings_dialog
-assert(settings_dialog ~= nil, "LỖI: settings_dialog không được khởi tạo!")
-print(string.format("  -> Đã mở hộp thoại thành công: '%s'", settings_dialog.title))
+assert(settings_dialog ~= nil, "ERROR: settings_dialog not initialized!")
+print(string.format("  -> Opened dialog successfully: '%s'", settings_dialog.title))
 
--- 4. Người dùng bấm nút '1. Địa chỉ Máy chủ' để sửa URL sang giá trị mới
+-- 4. User taps edit Server URL button
 local edit_url_button = settings_dialog.buttons[1][1]
-print(string.format("  -> Người dùng bấm nút: '%s'", edit_url_button.text))
+print(string.format("  -> User tapped button: '%s'", edit_url_button.text))
 MockKOReader.UIManager:reset()
 edit_url_button.callback()
 
--- Bàn phím ảo mở ra với InputDialog
-assert(#MockKOReader.UIManager._shown_widgets == 1, "LỖI: InputDialog cho Server URL chưa được mở!")
+-- Virtual keyboard opens with InputDialog
+assert(#MockKOReader.UIManager._shown_widgets == 1, "ERROR: InputDialog for Server URL not opened!")
 local input_dialog = MockKOReader.UIManager._shown_widgets[1]
-print(string.format("  -> Hộp thoại nhập hiện ra: '%s'", input_dialog.title))
+print(string.format("  -> Input dialog shown: '%s'", input_dialog.title))
 
--- Giả lập người dùng gõ URL mới: 'http://192.168.1.222:8000' và bấm nút Lưu
+-- Simulate user entering new URL and saving
 input_dialog.input = "http://192.168.1.222:8000"
 local save_button = input_dialog.buttons[1][2]
-assert(save_button.text == "Lưu", "LỖI: Không tìm thấy nút Lưu trong InputDialog!")
+assert(save_button.text == "Lưu" or save_button.text == "Save", "ERROR: Save button not found in InputDialog!")
 save_button.callback()
 
--- Kiểm tra xem giá trị mới đã được nạp vào memory chưa
+-- Verify value was updated in memory
 assert(plugin_instance.settings:get("server_url") == "http://192.168.1.222:8000",
-    "LỖI: Server URL chưa được cập nhật trong bộ nhớ sau khi bấm Lưu!")
-print(string.format("  -> Đã cập nhật Server URL thành: '%s'", plugin_instance.settings:get("server_url")))
-print("  [KẾT QUẢ DoD 1.3]: PASS - Chạm menu mở được hộp thoại và cập nhật URL thành công.")
+    "ERROR: Server URL was not updated in settings after saving!")
+print(string.format("  -> Updated Server URL to: '%s'", plugin_instance.settings:get("server_url")))
+print("  [DoD 1.3 RESULT]: PASS - Menu open, dialog display, and URL update verified.")
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 1.2: Bền vững dữ liệu qua chu kỳ Khởi động lại (Restart)
+-- VERIFY DoD 1.2: Data Persistence across App Restart
 -- =========================================================================
-step_banner(3, "Kiểm chứng DoD 1.2: Bền Vững Dữ Liệu Sau Khi Khởi Động Lại KOReader")
+step_banner(3, "Verify DoD 1.2: Configuration Persistence across App Restart")
 
--- 1. Giả lập người dùng thoát hoàn toàn KOReader (xóa sạch RAM & instance cũ)
-print("  -> Giả lập đóng ứng dụng KOReader: Hủy toàn bộ biến trong RAM...")
+-- 1. Simulate closing KOReader (clear RAM)
+print("  -> Simulating app shutdown: clearing RAM instances...")
 plugin_instance = nil
 PluginClass = nil
 _G.G_reader_settings = nil
 package.loaded["main"] = nil
 package.loaded["settings"] = nil
 
--- 2. Giả lập khởi động lại KOReader từ đầu
-print("  -> Khởi động lại KOReader từ đầu...")
-_G.G_reader_settings = persistent_storage -- Storage giữ nguyên dữ liệu đã lưu vào disk
+-- 2. Simulate restarting KOReader
+print("  -> Restarting KOReader from storage...")
+_G.G_reader_settings = persistent_storage
 
 local reloaded_main = require("main")
 local new_plugin_session = reloaded_main:new{
@@ -135,17 +135,17 @@ local new_plugin_session = reloaded_main:new{
 }
 new_plugin_session:init()
 
--- 3. Xác minh dữ liệu sau khởi động lại
+-- 3. Verify settings restored after restart
 local reloaded_url = new_plugin_session.settings:get("server_url")
-print(string.format("  -> Đọc lại cấu hình sau khi khởi động: Server URL = '%s'", reloaded_url))
+print(string.format("  -> Read setting after restart: Server URL = '%s'", reloaded_url))
 assert(reloaded_url == "http://192.168.1.222:8000",
-    "LỖI NGHIỆM THU: Sau khi restart, Server URL không giữ nguyên giá trị đã lưu!")
+    "VERIFICATION ERROR: Server URL did not persist after restart!")
 
 local reloaded_voice = new_plugin_session.settings:get("voice")
-assert(reloaded_voice == "vi-VN-NamMinh", "LỖI: Giá trị mặc định khác bị sai lệch!")
-print(string.format("  -> Giọng đọc mặc định: '%s'", reloaded_voice))
-print("  [KẾT QUẢ DoD 1.2]: PASS - Giá trị mới được lưu trữ và khôi phục nguyên vẹn sau khi restart.")
+assert(reloaded_voice == "vi-VN-NamMinh", "ERROR: Default voice was corrupted!")
+print(string.format("  -> Default voice: '%s'", reloaded_voice))
+print("  [DoD 1.2 RESULT]: PASS - Saved configuration persisted and restored across restart.")
 
 print("\n=========================================================================")
-print("  TỔNG KẾT: TẤT CẢ 3 TIÊU CHÍ ĐÃ ĐƯỢC KIỂM CHỨNG VÀ NGHIỆM THU 100%!   ")
+print("  SUMMARY: ALL 3 ACCEPTANCE CRITERIA VERIFIED 100%!                      ")
 print("=========================================================================\n")

@@ -1,9 +1,9 @@
 --[[
-    audio_backend.lua - Lớp phát âm thanh đa nền tảng (Hardware Audio Adapter)
-    Tương thích:
-      - Android (Boox, Meebook, Điện thoại): MediaPlayer JNI hoặc shell command
+    audio_backend.lua - Multi-platform hardware audio playback adapter
+    Supported targets:
+      - Android (Boox, Meebook, phones): MediaPlayer JNI or shell player
       - Linux / Kobo / Kindle: mpv, aplay
-      - Desktop / Test: Hệ thống phát hoặc mô phỏng nhịp phát chính xác theo header WAV
+      - Desktop / Test: System player or accurate duration-based timer playback
 --]]
 
 local ok_device, Device = pcall(require, "device")
@@ -29,14 +29,14 @@ end
 local AudioBackend = {}
 AudioBackend.__index = AudioBackend
 
---- Đọc số nguyên 16-bit little endian từ chuỗi nhị phân
+--- Read 16-bit little-endian integer from binary string
 local function read_uint16_le(str, offset)
     local b1 = string.byte(str, offset) or 0
     local b2 = string.byte(str, offset + 1) or 0
     return b1 + b2 * 256
 end
 
---- Đọc số nguyên 32-bit little endian từ chuỗi nhị phân
+--- Read 32-bit little-endian integer from binary string
 local function read_uint32_le(str, offset)
     local b1 = string.byte(str, offset) or 0
     local b2 = string.byte(str, offset + 1) or 0
@@ -45,16 +45,16 @@ local function read_uint32_le(str, offset)
     return b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
 end
 
---- Phân tích file WAV trích xuất thời lượng (giây), byte rate và sample rate
--- @param file_path Đường dẫn file .wav
--- @return number (thời lượng giây), number (byte rate), number (sample rate)
+--- Parse WAV file header to extract duration (seconds), byte rate, and sample rate
+-- @param file_path Path to .wav file
+-- @return number duration_seconds, number byte_rate, number sample_rate
 function AudioBackend.getWavDuration(file_path)
     local f = io.open(file_path, "rb")
     if not f then
         return 0, 0, 0
     end
 
-    local header = f:read(128) -- Đọc đoạn đầu bao gồm RIFF, fmt và data chunk header
+    local header = f:read(128) -- Read initial header covering RIFF, fmt, and data chunk headers
     f:close()
 
     if not header or #header < 44 then
@@ -65,7 +65,7 @@ function AudioBackend.getWavDuration(file_path)
         return 0, 0, 0
     end
 
-    -- Tìm vị trí chunk "fmt "
+    -- Locate "fmt " chunk
     local fmt_pos = header:find("fmt ")
     if not fmt_pos then
         return 0, 0, 0
@@ -75,14 +75,14 @@ function AudioBackend.getWavDuration(file_path)
     local sample_rate = read_uint32_le(header, fmt_pos + 12)
     local byte_rate = read_uint32_le(header, fmt_pos + 16)
 
-    -- Tìm vị trí chunk "data"
+    -- Locate "data" chunk
     local data_pos = header:find("data")
     local data_size = 0
     if data_pos and #header >= data_pos + 7 then
         data_size = read_uint32_le(header, data_pos + 4)
     end
 
-    -- Nếu không tìm thấy data_size trong 128 bytes đầu, lấy kích thước file trừ 44
+    -- Fallback: if data_size not found in first 128 bytes, estimate from file size minus header
     if data_size == 0 or data_size > 100000000 then
         local f_full = io.open(file_path, "rb")
         if f_full then
@@ -102,8 +102,8 @@ function AudioBackend.getWavDuration(file_path)
     return duration, byte_rate, sample_rate
 end
 
---- Khởi tạo đối tượng AudioBackend
--- @param options Bảng cấu hình { backend_type, speed }
+--- Initialize AudioBackend instance
+-- @param options Config table: { backend_type, speed }
 -- @return AudioBackend instance
 function AudioBackend:new(options)
     local instance = setmetatable({}, self)
@@ -121,7 +121,7 @@ function AudioBackend:new(options)
     return instance
 end
 
---- Tự động xác định driver âm thanh phù hợp theo nền tảng
+--- Detect appropriate audio driver based on device platform
 function AudioBackend:_detectDriver()
     if self.backend_type ~= "auto" then
         self.driver_name = self.backend_type
@@ -131,44 +131,42 @@ function AudioBackend:_detectDriver()
     if Device:isAndroid() then
         self.driver_name = "android"
     elseif Device:isKobo() or Device:isKindle() or Device:isLinux() then
-        -- Kiểm tra sự hiện diện của mpv hoặc aplay
         self.driver_name = "linux"
     else
         self.driver_name = "desktop"
     end
 end
 
---- Cập nhật tốc độ đọc (0.5x - 2.0x)
--- @param speed Tốc độ mới
+--- Update playback speed (0.5x - 2.0x)
+-- @param speed New speed multiplier
 function AudioBackend:setSpeed(speed)
     if type(speed) == "number" then
         self.speed = math.max(0.5, math.min(2.0, speed))
     end
 end
 
---- Kiểm tra trạng thái đang phát
+--- Check if audio is currently playing
 -- @return boolean
 function AudioBackend:isPlaying()
     return self._is_playing and not self._is_paused
 end
 
---- Dừng phát âm thanh ngay lập tức
+--- Stop audio playback immediately
 function AudioBackend:stop()
-    -- Tăng token để vô hiệu hóa ngay lập tức callback của tác vụ phát hiện tại
+    -- Increment token to invalidate any pending playback callbacks
     self._current_token = self._current_token + 1
     self._is_playing = false
     self._is_paused = false
 
-    -- Hủy timer nếu có
+    -- Cancel timer if scheduled
     if self._active_timer and UIManager.unschedule then
         UIManager:unschedule(self._active_timer)
     end
     self._active_timer = nil
 
-    -- Dừng tiến trình phát ngoại vi (nếu có)
+    -- Terminate external player process if running
     if self._active_process then
         pcall(function()
-            -- Trên Linux/Unix gửi kill lệnh
             if os and os.execute then
                 if package.config:sub(1, 1) ~= "\\" then
                     pcall(os.execute, "killall -9 mpv aplay 2>/dev/null")
@@ -179,51 +177,50 @@ function AudioBackend:stop()
     end
 end
 
---- Tạm dừng âm thanh
+--- Pause audio playback
 function AudioBackend:pause()
     if self._is_playing then
         self._is_paused = true
     end
 end
 
---- Tiếp tục phát âm thanh
+--- Resume audio playback
 function AudioBackend:resume()
     if self._is_playing and self._is_paused then
         self._is_paused = false
     end
 end
 
---- Bắt đầu phát một file âm thanh .wav
--- @param file_path Đường dẫn file .wav
--- @param on_finished Callback gọi khi âm thanh phát xong callback(success)
--- @param opts Bảng tùy chọn ghi đè: speed
+--- Start playing a .wav audio file
+-- @param file_path Path to .wav file
+-- @param on_finished Callback invoked when playback completes on_finished(success)
+-- @param opts Optional overrides: speed
 function AudioBackend:play(file_path, on_finished, opts)
     opts = opts or {}
     local speed = opts.speed or self.speed
 
     if not file_path or file_path == "" then
         if on_finished then on_finished(false) end
-        return false, "Đường dẫn file rỗng"
+        return false, "Empty file path"
     end
 
-    -- Dừng bất kỳ âm thanh nào đang phát trước đó
+    -- Stop any previous playback
     self:stop()
 
-    -- Tạo token mới cho phiên phát này
+    -- Generate new session token
     self._current_token = self._current_token + 1
     local session_token = self._current_token
     self._is_playing = true
     self._is_paused = false
 
-    -- Tính thời lượng của file âm thanh
+    -- Calculate file duration
     local duration, byte_rate, sample_rate = AudioBackend.getWavDuration(file_path)
     if duration <= 0 then
-        -- Mặc định an toàn nếu file quá ngắn hoặc không đọc được
         duration = 1.0
     end
     local actual_play_time = math.max(0.2, duration / speed)
 
-    -- Gọi driver thực tế
+    -- Dispatch to platform driver
     local driver_dispatched = false
     if self.driver_name == "linux" then
         driver_dispatched = self:_playLinux(file_path, speed)
@@ -231,9 +228,9 @@ function AudioBackend:play(file_path, on_finished, opts)
         driver_dispatched = self:_playAndroid(file_path, speed)
     end
 
-    -- Thiết lập timer theo dõi hoàn tất phiên phát (áp dụng cho Desktop/Test và fallback)
+    -- Schedule completion timer (used for Desktop/Test and driver fallback)
     self._active_timer = UIManager:scheduleIn(actual_play_time, function()
-        -- Kiểm tra phiên phát còn hiệu lực hay đã bị hủy bởi stop() / bài mới
+        -- Ensure session token is still valid and was not cancelled by stop()
         if self._current_token == session_token and self._is_playing then
             self._is_playing = false
             self._is_paused = false
@@ -247,10 +244,10 @@ function AudioBackend:play(file_path, on_finished, opts)
     return true
 end
 
---- Phát âm thanh trên nền tảng Linux E-reader (Kobo, Kindle, Linux)
+--- Play audio on Linux e-reader platforms (Kobo, Kindle, Linux)
 function AudioBackend:_playLinux(file_path, speed)
     local ok = pcall(function()
-        -- Ưu tiên 1: mpv hỗ trợ --speed
+        -- Priority 1: mpv with speed control
         local cmd = string.format('mpv --no-video --really-quiet --speed=%.2f "%s" >/dev/null 2>&1 &', speed, file_path)
         local ret = os.execute(cmd)
         if ret == 0 then
@@ -258,7 +255,7 @@ function AudioBackend:_playLinux(file_path, speed)
             return true
         end
 
-        -- Ưu tiên 2: aplay (ALSA native)
+        -- Priority 2: aplay (ALSA native)
         local aplay_cmd = string.format('aplay -q "%s" >/dev/null 2>&1 &', file_path)
         ret = os.execute(aplay_cmd)
         if ret == 0 then
@@ -270,10 +267,9 @@ function AudioBackend:_playLinux(file_path, speed)
     return ok
 end
 
---- Phát âm thanh trên Android (thông qua JNI MediaPlayer hoặc intent)
+--- Play audio on Android (via JNI MediaPlayer or intent)
 function AudioBackend:_playAndroid(file_path, speed)
     local ok, res = pcall(function()
-        -- Kiểm tra JNI wrapper của KOReader nếu có
         local ok_android, android = pcall(require, "android")
         if ok_android and android and android.playAudio then
             return android.playAudio(file_path, speed)

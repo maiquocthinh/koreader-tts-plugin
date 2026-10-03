@@ -1,10 +1,10 @@
 --[[
     tests/verify_acceptance_phase2.lua
-    Kịch bản kiểm chứng nghiệm thu đầu-cuối (E2E Acceptance Verification) cho Phase 2
-    Mô phỏng chính xác chu kỳ hoạt động trích xuất và chuẩn hóa văn bản của KOReader:
-      1. DoD 2.1: Trích xuất nội dung từ Document Engine (Crengine & MuPDF)
-      2. DoD 2.2: Làm sạch văn bản (Sanitization) & Từ điển phát âm (CRUD Mapping)
-      3. DoD 2.3: Thuật toán cắt câu 3 tầng & Ánh xạ Bounding Box
+    End-to-End Acceptance Verification script for Phase 2
+    Simulates text extraction and normalization lifecycle in KOReader:
+      1. DoD 2.1: Text extraction from Document Engine (Crengine & MuPDF)
+      2. DoD 2.2: Text sanitization & Pronunciation dictionary (CRUD Mapping)
+      3. DoD 2.3: 3-tier sentence chunking & Bounding Box mapping
 --]]
 
 package.path = "./?.lua;./tests/?.lua;" .. package.path
@@ -17,13 +17,13 @@ local TextChunker = require("text_chunker")
 local KoreaderTTS = require("main")
 
 local function step_banner(num, title)
-    print(string.format("\n=== [BƯỚC %d] %s ===", num, title))
+    print(string.format("\n=== [STEP %d] %s ===", num, title))
 end
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 2.1: Trích xuất nội dung từ Document Engine (Crengine & MuPDF)
+-- VERIFY DoD 2.1: Text extraction from Document Engine (Crengine & MuPDF)
 -- =========================================================================
-step_banner(1, "Kiểm chứng DoD 2.1: Trích xuất nội dung thô từ Document Engine")
+step_banner(1, "Verify DoD 2.1: Raw Text Extraction from Document Engines")
 
 local sample_epub_text = "Chương 1: Bình minh trên cao nguyên.\n"
     .. "Ánh mặt trời buổi sớm len lỏi qua từng kẽ lá rừng thông bạt ngàn. "
@@ -38,13 +38,13 @@ local sample_crengine_boxes = {
 local crengine_doc = MockKOReader.createMockCrengineDocument(sample_epub_text, sample_crengine_boxes)
 local chunker = TextChunker:new()
 
--- 1. Trích xuất văn bản từ Crengine (EPUB)
+-- 1. Extract text from Crengine (EPUB)
 local raw_cre, boxes_cre = chunker:extractRawPageText(crengine_doc, 1)
-assert(type(raw_cre) == "string" and #raw_cre > 0, "LỖI DoD 2.1: Crengine không trả về text thô!")
-assert(#boxes_cre == 3, "LỖI DoD 2.1: Crengine không trả về word bboxes!")
-print(string.format("  -> Crengine: Đã trích xuất thành công %d ký tự thô và %d bounding boxes.", #raw_cre, #boxes_cre))
+assert(type(raw_cre) == "string" and #raw_cre > 0, "ERROR DoD 2.1: Crengine did not return raw text!")
+assert(#boxes_cre == 3, "ERROR DoD 2.1: Crengine did not return word bboxes!")
+print(string.format("  -> Crengine: Successfully extracted %d raw chars and %d bounding boxes.", #raw_cre, #boxes_cre))
 
--- 2. Trích xuất văn bản từ MuPDF (PDF)
+-- 2. Extract text from MuPDF (PDF)
 local sample_pdf_text = "BÁO CÁO TÀI CHÍNH QUÝ 3.\n"
     .. "Doanh thu hợp nhất toàn tập đoàn ghi nhận mức tăng trưởng 12.5% so với cùng kỳ năm ngoái."
 
@@ -55,57 +55,57 @@ local sample_mupdf_boxes = {
 local mupdf_doc = MockKOReader.createMockMuPDFDocument(sample_pdf_text, sample_mupdf_boxes)
 
 local raw_mu, boxes_mu = chunker:extractRawPageText(mupdf_doc, 1)
-assert(type(raw_mu) == "string" and #raw_mu > 0, "LỖI DoD 2.1: MuPDF không trả về text thô!")
-assert(#boxes_mu == 2, "LỖI DoD 2.1: MuPDF không trả về word bboxes!")
-print(string.format("  -> MuPDF: Đã trích xuất thành công %d ký tự thô và %d bounding boxes.", #raw_mu, #boxes_mu))
-print("  [KẾT QUẢ DoD 2.1]: PASS - Đã trích xuất toàn bộ chuỗi text thô từ cả hai Document Engine.")
+assert(type(raw_mu) == "string" and #raw_mu > 0, "ERROR DoD 2.1: MuPDF did not return raw text!")
+assert(#boxes_mu == 2, "ERROR DoD 2.1: MuPDF did not return word bboxes!")
+print(string.format("  -> MuPDF: Successfully extracted %d raw chars and %d bounding boxes.", #raw_mu, #boxes_mu))
+print("  [DoD 2.1 RESULT]: PASS - Raw text successfully extracted from both document engines.")
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 2.2: Làm sạch văn bản & Từ điển phát âm (CRUD Mapping)
+-- VERIFY DoD 2.2: Text Sanitization & Pronunciation Dictionary (CRUD Mapping)
 -- =========================================================================
-step_banner(2, "Kiểm chứng DoD 2.2: Làm sạch văn bản rác & Từ điển phát âm tùy biến")
+step_banner(2, "Verify DoD 2.2: Text Sanitization & Pronunciation Dictionary")
 
 local dirty_text = " 108 \n"
     .. "Theo báo cáo của TS.[1] Trần Văn An tại hội nghị khoa học TP.* Hồ Chí Minh, "
     .. "các ứng dụng AI[2] đang tạo nên bước đột phá lớn trong ngành CNTT† và NXB‡, v.v.\n"
     .. " 108 "
 
--- 1. Làm sạch ký tự rác
+-- 1. Sanitize text
 local cleaned_text = chunker:sanitize(dirty_text)
-assert(not cleaned_text:find("%[1%]"), "LỖI DoD 2.2: Còn sót chú thích [1]")
-assert(not cleaned_text:find("%[2%]"), "LỖI DoD 2.2: Còn sót chú thích [2]")
-assert(not cleaned_text:find("%*"), "LỖI DoD 2.2: Còn sót dấu hoa thị *")
-assert(not cleaned_text:find("†"), "LỖI DoD 2.2: Còn sót dấu †")
-assert(not cleaned_text:find("‡"), "LỖI DoD 2.2: Còn sót dấu ‡")
-assert(not cleaned_text:find("^108"), "LỖI DoD 2.2: Còn sót số trang đầu")
-assert(not cleaned_text:find("108$"), "LỖI DoD 2.2: Còn sót số trang cuối")
-print("  -> Lọc sạch 100% chú thích rác [1], [2], *, †, ‡ và số trang header/footer.")
+assert(not cleaned_text:find("%[1%]"), "ERROR DoD 2.2: Residual footnote [1]")
+assert(not cleaned_text:find("%[2%]"), "ERROR DoD 2.2: Residual footnote [2]")
+assert(not cleaned_text:find("%*"), "ERROR DoD 2.2: Residual asterisk *")
+assert(not cleaned_text:find("†"), "ERROR DoD 2.2: Residual dagger †")
+assert(not cleaned_text:find("‡"), "ERROR DoD 2.2: Residual double dagger ‡")
+assert(not cleaned_text:find("^108"), "ERROR DoD 2.2: Residual header page number")
+assert(not cleaned_text:find("108$"), "ERROR DoD 2.2: Residual footer page number")
+print("  -> Filtered 100% of footnotes [1], [2], *, †, ‡ and header/footer page numbers.")
 
--- 2. Kiểm chứng từ điển mặc định + CRUD tùy biến của người dùng
+-- 2. Validate default + custom pronunciation dictionary
 local storage = MockKOReader.createMockSettings()
 local settings = Settings:new(storage)
 
--- Người dùng tùy biến thêm từ 'AI' thành 'Trí tuệ nhân tạo'
+-- Custom mapping for 'AI' -> 'Trí tuệ nhân tạo'
 settings:setWordMapping("AI", "Trí tuệ nhân tạo")
 settings:save()
 
 local custom_chunker = TextChunker:new{ custom_mappings = settings:getCustomMappings() }
 local tts_ready_text = custom_chunker:normalizePronunciation(cleaned_text)
 
-assert(tts_ready_text:find("Tiến sĩ"), "LỖI DoD 2.2: 'TS.' chưa được chuyển thành 'Tiến sĩ'!")
-assert(tts_ready_text:find("Thành phố"), "LỖI DoD 2.2: 'TP.' chưa được chuyển thành 'Thành phố'!")
-assert(tts_ready_text:find("Trí tuệ nhân tạo"), "LỖI DoD 2.2: 'AI' tùy biến chưa được chuyển thành 'Trí tuệ nhân tạo'!")
-assert(tts_ready_text:find("Công nghệ thông tin"), "LỖI DoD 2.2: 'CNTT' chưa được chuyển thành 'Công nghệ thông tin'!")
-assert(tts_ready_text:find("Nhà xuất bản"), "LỖI DoD 2.2: 'NXB' chưa được chuyển thành 'Nhà xuất bản'!")
-assert(tts_ready_text:find("vân vân"), "LỖI DoD 2.2: 'v.v.' chưa được chuyển thành 'vân vân'!")
+assert(tts_ready_text:find("Tiến sĩ"), "ERROR DoD 2.2: 'TS.' was not converted to 'Tiến sĩ'!")
+assert(tts_ready_text:find("Thành phố"), "ERROR DoD 2.2: 'TP.' was not converted to 'Thành phố'!")
+assert(tts_ready_text:find("Trí tuệ nhân tạo"), "ERROR DoD 2.2: 'AI' was not converted to 'Trí tuệ nhân tạo'!")
+assert(tts_ready_text:find("Công nghệ thông tin"), "ERROR DoD 2.2: 'CNTT' was not converted to 'Công nghệ thông tin'!")
+assert(tts_ready_text:find("Nhà xuất bản"), "ERROR DoD 2.2: 'NXB' was not converted to 'Nhà xuất bản'!")
+assert(tts_ready_text:find("vân vân"), "ERROR DoD 2.2: 'v.v.' was not converted to 'vân vân'!")
 
-print(string.format("  -> Chuẩn hóa phát âm chuẩn xác:\n     \"%s\"", tts_ready_text))
-print("  [KẾT QUẢ DoD 2.2]: PASS - Làm sạch 100% ký tự rác và áp dụng từ điển phát âm hoàn hảo.")
+print(string.format("  -> Accurate pronunciation normalization:\n     \"%s\"", tts_ready_text))
+print("  [DoD 2.2 RESULT]: PASS - Cleaned 100% of artifact chars and applied pronunciation dictionary.")
 
 -- =========================================================================
--- KIỂM CHỨNG DoD 2.3: Thuật toán cắt câu 3 tầng & Bounding Box
+-- VERIFY DoD 2.3: 3-tier sentence chunking & Bounding Box mapping
 -- =========================================================================
-step_banner(3, "Kiểm chứng DoD 2.3: Phân đoạn câu 3 tầng (30 - 300 chars) & BBoxes")
+step_banner(3, "Verify DoD 2.3: 3-tier Chunking (30 - 300 chars) & BBoxes")
 
 local complex_doc_text = "Hôm nay tôi đi dạo. Trời đẹp quá! "
     .. "Bạn có đi uống cà phê không? Tôi hỏi nhưng anh ấy im lặng… "
@@ -114,25 +114,23 @@ local complex_doc_text = "Hôm nay tôi đi dạo. Trời đẹp quá! "
 local complex_doc = MockKOReader.createMockCrengineDocument(complex_doc_text)
 local final_chunks = custom_chunker:extractPageChunks(complex_doc, 1)
 
-assert(#final_chunks >= 2, "LỖI DoD 2.3: Số lượng câu phân tách quá ít!")
-print(string.format("  -> Phân tách được tổng cộng %d câu:", #final_chunks))
+assert(#final_chunks >= 2, "ERROR DoD 2.3: Chunk count too low!")
+print(string.format("  -> Chunked into %d total sentences:", #final_chunks))
 
 for i, c in ipairs(final_chunks) do
     local len = #c.text
-    print(string.format("     [%d] Độ dài: %3d ký tự | BBoxes: %d | Nội dung: \"%s...\"",
+    print(string.format("     [%d] Length: %3d chars | BBoxes: %d | Preview: \"%s...\"",
         c.index, len, #c.bboxes, c.text:sub(1, 60)))
 
-    -- Kiểm tra điều kiện DoD 2.3:
-    -- Mọi câu (trừ câu cuối có thể ngắn hơn) phải có độ dài từ 30 đến 300 ký tự
     if i < #final_chunks then
-        assert(len >= 30, string.format("LỖI DoD 2.3: Câu %d quá ngắn (< 30 ký tự): %d ký tự", i, len))
+        assert(len >= 30, string.format("ERROR DoD 2.3: Chunk %d too short (< 30 chars): %d chars", i, len))
     end
-    assert(len <= 300, string.format("LỖI DoD 2.3: Câu %d quá dài (> 300 ký tự): %d ký tự", i, len))
-    assert(type(c.bboxes) == "table", string.format("LỖI DoD 2.3: Câu %d không có mảng bboxes!", i))
+    assert(len <= 300, string.format("ERROR DoD 2.3: Chunk %d too long (> 300 chars): %d chars", i, len))
+    assert(type(c.bboxes) == "table", string.format("ERROR DoD 2.3: Chunk %d missing bboxes table!", i))
 end
 
-print("  [KẾT QUẢ DoD 2.3]: PASS - 100% câu phân đoạn nằm trong khoảng 30 - 300 ký tự và có BBoxes.")
+print("  [DoD 2.3 RESULT]: PASS - 100% of chunks are within 30 - 300 chars with valid BBoxes.")
 
 print("\n=========================================================================")
-print("  TỔNG KẾT: TẤT CẢ 3 TIÊU CHÍ GIAI ĐOẠN 2 ĐÃ ĐƯỢC NGHIỆM THU 100%!     ")
+print("  SUMMARY: ALL 3 PHASE 2 ACCEPTANCE CRITERIA VERIFIED 100%!               ")
 print("=========================================================================\n")

@@ -1,6 +1,6 @@
 --[[
-    tests/mock_koreader.lua - Mock môi trường runtime của KOReader
-    Phục vụ chạy unit test độc lập mà không cần toàn bộ source code KOReader.
+    tests/mock_koreader.lua - Mock KOReader runtime environment
+    Enables running standalone unit tests without the full KOReader source code.
 --]]
 
 local MockKOReader = {}
@@ -189,10 +189,15 @@ end
 
 local MockDevice = {
     _platform = "desktop",
+    _standby_prevented = false,
 }
 
 function MockDevice:setPlatform(platform)
     self._platform = platform or "desktop"
+end
+
+function MockDevice:preventStandby(enable)
+    self._standby_prevented = enable
 end
 
 function MockDevice:isAndroid()
@@ -231,7 +236,7 @@ function MockKOReader.installGlobals()
         err = function(...) end,
     }
 
-    -- Mock các require() của KOReader
+    -- Mock KOReader require() modules
     package.preload["gettext"] = function()
         return MockKOReader.gettext
     end
@@ -290,6 +295,8 @@ end
 function MockKOReader.createMockCrengineDocument(sample_text, sample_bboxes)
     return {
         _engine = "crengine",
+        file = "/sdcard/books/sample_crengine.epub",
+        getMD5 = function(self) return "md5_crengine_123" end,
         getTextFromPositions = function(self, page)
             return sample_text or ""
         end,
@@ -306,6 +313,8 @@ end
 function MockKOReader.createMockMuPDFDocument(sample_text, sample_bboxes)
     return {
         _engine = "mupdf",
+        file = "/sdcard/books/sample_mupdf.pdf",
+        getMD5 = function(self) return "md5_mupdf_456" end,
         getPageText = function(self, page)
             return sample_text or ""
         end,
@@ -319,14 +328,17 @@ function MockKOReader.createMockMuPDFDocument(sample_text, sample_bboxes)
     }
 end
 
---- Mock tài liệu đa trang (hỗ trợ kiểm thử chuyển trang & tải xuyên trang)
-function MockKOReader.createMockMultiPageDocument(pages_text_table, total_pages)
+--- Mock multi-page document (supports testing page turns & cross-page preloads)
+function MockKOReader.createMockMultiPageDocument(pages_text_table, total_pages, book_md5)
     pages_text_table = pages_text_table or {}
     total_pages = total_pages or #pages_text_table
     local current_page = 1
+    local md5 = book_md5 or "md5_multipage_789"
 
     return {
         _engine = "crengine",
+        file = "/sdcard/books/multipage_book.epub",
+        getMD5 = function(self) return md5 end,
         _pages = pages_text_table,
         _total_pages = total_pages,
         getTextFromPositions = function(self, page)
@@ -351,7 +363,7 @@ function MockKOReader.createMockMultiPageDocument(pages_text_table, total_pages)
     }
 end
 
---- Mock đối tượng Reader UI (hỗ trợ onNextPage, onPrevPage, gotoPage, view.state.page, view highlight)
+--- Mock Reader UI object (supports onNextPage, onPrevPage, gotoPage, view.state.page, view highlight)
 function MockKOReader.createMockUI(doc, initial_page)
     initial_page = initial_page or 1
     local mock_ui = {

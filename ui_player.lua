@@ -1,10 +1,10 @@
 --[[
-    ui_player.lua - Giao diện Native & Đồng bộ Mắt - Tai cho KOReader TTS Plugin
-    Triển khai:
-      - Thanh điều khiển nổi neo đáy màn hình (Floating Control Bar) chuẩn E-ink
-      - Chế độ thu nhỏ (Mini Floating Bubble)
-      - Đồng bộ bôi sáng câu thời gian thực (Sentence Highlighting) với partial E-ink refresh
-      - Tương tác hai chiều mượt mà với PlaybackQueue
+    ui_player.lua - Native UI & Visual Sync for KOReader TTS Plugin
+    Features:
+      - Floating Control Bar anchored to bottom of screen (E-ink optimized)
+      - Mini Floating Bubble mode
+      - Real-time sentence highlighting with partial E-ink refresh
+      - Two-way synchronization with PlaybackQueue
 --]]
 
 local WidgetContainer = require("ui/widget/widgetcontainer")
@@ -59,14 +59,16 @@ if not ok_gettext or type(_) ~= "function" then
     _ = function(msg) return msg end
 end
 
+local SleepTimer = require("sleep_timer")
+
 local UIPlayer = WidgetContainer:extend{
     name = "koreader_tts_ui_player",
 }
 
--- Danh sách các nấc tốc độ đọc hỗ trợ xoay vòng
+-- Playback speed presets for cycling
 local SPEED_LEVELS = { 0.8, 1.0, 1.2, 1.5, 2.0 }
 
---- Khởi tạo đối tượng UIPlayer
+--- Initialize UIPlayer instance
 function UIPlayer:new(opts)
     local instance = setmetatable({}, self)
     opts = opts or {}
@@ -86,7 +88,30 @@ function UIPlayer:new(opts)
     instance.current_index = 1
     instance.total_on_page = 1
 
-    -- Tham chiếu widget
+    -- Sleep Timer integration
+    instance.sleep_timer = opts.sleep_timer or SleepTimer:new{
+        uimanager = UIManager,
+        on_timeout = function(reason)
+            if instance.playback_queue then
+                instance.playback_queue:stop()
+            end
+            instance:hide()
+            local ok_info, InfoMessage = pcall(require, "ui/widget/infomessage")
+            if ok_info and InfoMessage then
+                UIManager:show(InfoMessage:new{
+                    text = _("Đã dừng đọc theo hẹn giờ."),
+                    timeout = 3,
+                })
+            end
+        end,
+        on_tick = function(rem)
+            if instance.sleep_timer_btn and instance.sleep_timer_btn.setText and rem % 60 == 0 then
+                instance.sleep_timer_btn:setText(instance.sleep_timer:getDisplayText())
+            end
+        end,
+    }
+
+    -- Widget references
     instance.control_bar = nil
     instance.mini_bubble = nil
     instance.title_widget = nil
@@ -94,12 +119,13 @@ function UIPlayer:new(opts)
     instance.mini_play_btn = nil
     instance.mini_label_btn = nil
     instance.speed_btn = nil
+    instance.sleep_timer_btn = nil
     instance.buffer_status_widget = nil
 
     return instance
 end
 
---- Hiển thị giao diện điều khiển (thanh lớn hoặc mini bubble tùy trạng thái)
+--- Show UI player (full bar or mini bubble based on current mode)
 function UIPlayer:show()
     self.visible = true
     if self.is_mini then
@@ -109,7 +135,7 @@ function UIPlayer:show()
     end
 end
 
---- Ẩn toàn bộ giao diện điều khiển và làm sạch highlight
+--- Hide UI player completely and clear highlights
 function UIPlayer:hide()
     self.visible = false
     self:hideControlBar()
@@ -117,7 +143,7 @@ function UIPlayer:hide()
     self:clearHighlight()
 end
 
---- Chuyển đổi qua lại giữa thanh điều khiển đầy đủ và bong bóng thu nhỏ
+--- Toggle between full control bar and mini floating bubble
 function UIPlayer:toggleMode()
     if self.is_mini then
         self.is_mini = false
@@ -130,7 +156,7 @@ function UIPlayer:toggleMode()
     end
 end
 
---- Hiển thị thanh điều khiển nổi (Floating Control Bar) neo ở đáy màn hình
+--- Show Floating Control Bar anchored to bottom of screen
 function UIPlayer:showControlBar()
     if self.control_bar then
         UIManager:close(self.control_bar)
@@ -141,7 +167,7 @@ function UIPlayer:showControlBar()
     local screen_h = Screen:getHeight()
     local bar_h = 135
 
-    -- 1. Dòng 1: Header (Tiêu đề tiến độ, nút thu nhỏ [—], nút đóng [✕])
+    -- 1. Row 1: Header (Progress title, Minimize button [—], Close button [✕])
     self.title_widget = TextWidget:new{
         text = string.format(_("Trang %d · Câu %d/%d"), self.current_page, self.current_index, self.total_on_page),
     }
@@ -166,7 +192,7 @@ function UIPlayer:showControlBar()
         btn_close,
     }
 
-    -- 2. Dòng 2: Cụm 5 nút điều khiển phát âm thanh
+    -- 2. Row 2: 5 Playback navigation control buttons
     local btn_prev_page = IconButton:new{
         icon = "backward_step",
         text = "|<",
@@ -216,12 +242,19 @@ function UIPlayer:showControlBar()
         btn_next_page,
     }
 
-    -- 3. Dòng 3: Footer (Tốc độ đọc, Giọng đọc, Đèn trạng thái đệm)
+    -- 3. Row 3: Footer (Speed selector, Sleep timer, Voice, Buffer status)
     local cur_speed = self.audio_backend and self.audio_backend.speed or 1.0
     self.speed_btn = Button:new{
         text = string.format(_("Tốc độ: %.1fx"), cur_speed),
         callback = function()
             this:onCycleSpeed()
+        end,
+    }
+
+    self.sleep_timer_btn = Button:new{
+        text = self.sleep_timer and self.sleep_timer:getDisplayText() or _("Hẹn giờ: Tắt"),
+        callback = function()
+            this:onCycleSleepTimer()
         end,
     }
 
@@ -236,11 +269,12 @@ function UIPlayer:showControlBar()
 
     local footer_row = HorizontalGroup:new{
         self.speed_btn,
+        self.sleep_timer_btn,
         voice_text,
         self.buffer_status_widget,
     }
 
-    -- Cây widget tổng thể: FrameContainer viền 1px
+    -- Root frame: 1px border FrameContainer
     local group = VerticalGroup:new{
         header_row,
         controls_row,
@@ -258,19 +292,20 @@ function UIPlayer:showControlBar()
     self:_updateBufferStatus()
 end
 
---- Đóng thanh điều khiển nổi
+--- Hide Floating Control Bar
 function UIPlayer:hideControlBar()
     if self.control_bar then
         UIManager:close(self.control_bar)
         self.control_bar = nil
         self.play_pause_btn = nil
         self.speed_btn = nil
+        self.sleep_timer_btn = nil
         self.title_widget = nil
         self.buffer_status_widget = nil
     end
 end
 
---- Hiển thị Mini Floating Bubble ở góc dưới bên phải màn hình
+--- Show Mini Floating Bubble in bottom-right corner
 function UIPlayer:showMiniBubble()
     if self.mini_bubble then
         UIManager:close(self.mini_bubble)
@@ -295,7 +330,7 @@ function UIPlayer:showMiniBubble()
     self.mini_label_btn = Button:new{
         text = string.format("%d/%d · %.1fx", self.current_index, self.total_on_page, cur_speed),
         callback = function()
-            -- Chạm vào phần chữ để phóng to trở lại thanh điều khiển đầy đủ
+            -- Tap text label to restore full control bar
             this:toggleMode()
         end,
     }
@@ -320,7 +355,7 @@ function UIPlayer:showMiniBubble()
     UIManager:show(self.mini_bubble)
 end
 
---- Đóng Mini Floating Bubble
+--- Hide Mini Floating Bubble
 function UIPlayer:hideMiniBubble()
     if self.mini_bubble then
         UIManager:close(self.mini_bubble)
@@ -331,12 +366,12 @@ function UIPlayer:hideMiniBubble()
 end
 
 -- =========================================================================
--- ĐỒNG BỘ BÔI SÁNG CÂU TRÊN MÀN HÌNH E-INK (SENTENCE HIGHLIGHTING)
+-- SENTENCE HIGHLIGHTING (E-INK FRIENDLY)
 -- =========================================================================
 
---- Bôi sáng câu đang đọc và làm mới cục bộ (Partial Refresh) chống chớp màn hình
--- @param bboxes Mảng tọa độ các hình chữ nhật bao quanh chữ
--- @param mode Chế độ bôi sáng: "gray" | "underline" | "none"
+--- Highlight current sentence using partial refresh (no full screen flash)
+-- @param bboxes Array of bounding box tables { x, y, w, h }
+-- @param mode Highlight mode: "gray" | "underline" | "none"
 function UIPlayer:highlightSentence(bboxes, mode)
     mode = mode or (self.settings and self.settings:get("highlight_mode")) or "gray"
     if mode == "none" then
@@ -348,7 +383,7 @@ function UIPlayer:highlightSentence(bboxes, mode)
         return
     end
 
-    -- Thu thập vùng chữ nhật cũ để gom vào lệnh làm mới cục bộ (partial dirty rect)
+    -- Collect previous rects to dirty for clean removal
     local dirty_rects = {}
     if self.current_highlight then
         for _, rect in ipairs(self.current_highlight) do
@@ -356,7 +391,7 @@ function UIPlayer:highlightSentence(bboxes, mode)
         end
     end
 
-    -- Xóa highlight cũ
+    -- Clear old highlight on view
     if type(self.view.clearHighlight) == "function" then
         pcall(self.view.clearHighlight, self.view)
     end
@@ -369,12 +404,12 @@ function UIPlayer:highlightSentence(bboxes, mode)
         return
     end
 
-    -- Áp dụng highlight theo chế độ
+    -- Apply highlight style
     local highlight_boxes = bboxes
     local highlight_color = Blitbuffer.COLOR_GRAY_E
 
     if mode == "underline" then
-        -- Chế độ gạch chân: biến đổi mỗi bbox thành một đường viền h=2px ở đáy dòng
+        -- Underline style: 2px stripe at the bottom of each text line
         highlight_boxes = {}
         for _, b in ipairs(bboxes) do
             table.insert(highlight_boxes, {
@@ -393,18 +428,18 @@ function UIPlayer:highlightSentence(bboxes, mode)
 
     self.current_highlight = highlight_boxes
 
-    -- Gom tọa độ mới vào danh sách dirty
+    -- Add new rects to dirty list
     for _, rect in ipairs(highlight_boxes) do
         table.insert(dirty_rects, rect)
     end
 
-    -- Yêu cầu UIManager chỉ làm mới đúng vùng hình chữ nhật cục bộ (Không chớp toàn màn hình)
+    -- Instruct UIManager to execute partial refresh only (prevents E-ink flash)
     if #dirty_rects > 0 and UIManager.setDirty then
         pcall(UIManager.setDirty, UIManager, self.view, "partial", dirty_rects)
     end
 end
 
---- Làm sạch highlight đang hiển thị
+--- Clear active sentence highlight
 function UIPlayer:clearHighlight()
     if self.current_highlight and self.view then
         local old_rects = self.current_highlight
@@ -420,10 +455,10 @@ function UIPlayer:clearHighlight()
 end
 
 -- =========================================================================
--- ĐỒNG BỘ TRẠNG THÁI & PHẢN HỒI SỰ KIỆN TỪ PLAYBACK QUEUE
+-- STATE SYNCHRONIZATION WITH PLAYBACK QUEUE
 -- =========================================================================
 
---- Cập nhật biểu tượng Play/Pause trên các widget đang mở
+--- Update Play/Pause icon across active widgets
 function UIPlayer:_updatePlayPauseIcon()
     local is_playing = self.playback_queue and (self.playback_queue:getState() == "PLAYING")
     local icon = is_playing and "pause" or "play"
@@ -439,7 +474,7 @@ function UIPlayer:_updatePlayPauseIcon()
     end
 end
 
---- Cập nhật đèn trạng thái bộ đệm (●●, ●○, ○○)
+--- Update buffer status indicator (●●, ●○, ○○)
 function UIPlayer:_updateBufferStatus()
     if not self.buffer_status_widget or not self.playback_queue then
         return
@@ -463,13 +498,13 @@ function UIPlayer:_updateBufferStatus()
     end
 end
 
---- Xử lý sự kiện khi câu đọc thay đổi
+--- Event callback when current chunk changes
 function UIPlayer:onChunkChange(chunk, page, index, total)
     self.current_page = page
     self.current_index = index
     self.total_on_page = total or self.total_on_page
 
-    -- 1. Cập nhật nhãn tiến độ
+    -- 1. Update progress labels
     local progress_str = string.format(_("Trang %d · Câu %d/%d"), page, index, total)
     if self.title_widget and self.title_widget.setText then
         self.title_widget:setText(progress_str)
@@ -480,44 +515,47 @@ function UIPlayer:onChunkChange(chunk, page, index, total)
         self.mini_label_btn:setText(string.format("%d/%d · %.1fx", index, total, cur_speed))
     end
 
-    -- 2. Đồng bộ bôi sáng câu trên trang sách
+    -- 2. Synchronize sentence highlight
     if chunk and chunk.bboxes then
         self:highlightSentence(chunk.bboxes)
     end
 
-    -- 3. Cập nhật đèn đệm & icon
+    -- 3. Update buffer & play/pause icon
     self:_updateBufferStatus()
     self:_updatePlayPauseIcon()
 end
 
---- Xử lý sự kiện khi trạng thái FSM thay đổi
+--- Event callback when FSM state changes
 function UIPlayer:onStateChange(old_state, new_state)
     self:_updatePlayPauseIcon()
     self:_updateBufferStatus()
 end
 
---- Xử lý sự kiện khi tự động lật sang trang mới
+--- Event callback when page turns
 function UIPlayer:onPageTurn(new_page)
     self.current_page = new_page
     self:clearHighlight()
+    if self.sleep_timer then
+        self.sleep_timer:onPageTurn(new_page)
+    end
 end
 
---- Xử lý sự kiện khi đọc xong toàn bộ sách
+--- Event callback when entire book completes
 function UIPlayer:onFinished()
     self:clearHighlight()
     self:_updatePlayPauseIcon()
 end
 
---- Xử lý sự kiện khi gặp lỗi âm thanh hoặc mạng
+--- Event callback on error
 function UIPlayer:onError(err)
     self:_updatePlayPauseIcon()
 end
 
 -- =========================================================================
--- HÀNH VI TƯƠNG TÁC TỪ CÁC NÚT BẤM (USER ACTIONS)
+-- USER ACTION HANDLERS
 -- =========================================================================
 
---- Bấm Play / Pause
+--- Toggle Play / Pause
 function UIPlayer:onTogglePlayPause()
     if self.playback_queue then
         self.playback_queue:togglePlayPause()
@@ -525,35 +563,35 @@ function UIPlayer:onTogglePlayPause()
     end
 end
 
---- Bấm Câu tiếp theo
+--- Advance to next chunk
 function UIPlayer:onNextChunk()
     if self.playback_queue then
         self.playback_queue:nextChunk()
     end
 end
 
---- Bấm Câu trước đó
+--- Return to previous chunk
 function UIPlayer:onPrevChunk()
     if self.playback_queue then
         self.playback_queue:prevChunk()
     end
 end
 
---- Bấm Trang tiếp theo (Đoạn sau)
+--- Advance to next page
 function UIPlayer:onNextPage()
     if self.playback_queue then
         self.playback_queue:seekChunk(self.current_page + 1, 1)
     end
 end
 
---- Bấm Trang trước đó (Đoạn trước)
+--- Return to previous page
 function UIPlayer:onPrevPage()
     if self.playback_queue and self.current_page > 1 then
         self.playback_queue:seekChunk(self.current_page - 1, 1)
     end
 end
 
---- Xoay vòng tốc độ đọc (0.8x -> 1.0x -> 1.2x -> 1.5x -> 2.0x)
+--- Cycle playback speed presets (0.8x -> 1.0x -> 1.2x -> 1.5x -> 2.0x)
 function UIPlayer:onCycleSpeed()
     local cur_speed = self.audio_backend and self.audio_backend.speed or 1.0
     local next_speed = SPEED_LEVELS[1]
@@ -581,7 +619,25 @@ function UIPlayer:onCycleSpeed()
     end
 end
 
---- Bấm nút đóng [✕]
+--- Cycle sleep timer mode presets (Off -> 15m -> 30m -> 45m -> End of page)
+function UIPlayer:onCycleSleepTimer()
+    if not self.sleep_timer then return end
+    local modes = { "0", "15", "30", "45", "page" }
+    local cur = tostring(self.sleep_timer:getMode())
+    local next_m = modes[1]
+    for i, m in ipairs(modes) do
+        if m == cur then
+            next_m = modes[(i % #modes) + 1]
+            break
+        end
+    end
+    self.sleep_timer:setMode(next_m)
+    if self.sleep_timer_btn and self.sleep_timer_btn.setText then
+        self.sleep_timer_btn:setText(self.sleep_timer:getDisplayText())
+    end
+end
+
+--- Close player and stop playback
 function UIPlayer:onClose()
     if self.playback_queue then
         self.playback_queue:stop()

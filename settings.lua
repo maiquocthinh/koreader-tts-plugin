@@ -1,6 +1,6 @@
 --[[
-    settings.lua - Quản lý cấu hình bền vững cho KOReader TTS Plugin
-    Lưu trữ cấu hình trong G_reader_settings dưới khóa "koreader_tts".
+    settings.lua - Persistent configuration management for KOReader TTS Plugin
+    Stores configuration in G_reader_settings under the "koreader_tts" key.
 --]]
 
 local Settings = {}
@@ -8,40 +8,40 @@ Settings.__index = Settings
 
 local SETTING_KEY = "koreader_tts"
 
--- Bảng cấu hình mặc định chuẩn (Schema Default)
+-- Default configuration schema
 local DEFAULT_SETTINGS = {
-    -- 1. Máy chủ & Mạng
-    server_url          = "http://192.168.1.100:7860", -- Base API endpoint (OpenAI / VieNeu)
-    api_key             = "",                          -- Bearer token (nếu có)
-    request_timeout     = 10,                          -- Timeout mạng (giây)
+    -- 1. Server & Network
+    server_url          = "http://192.168.1.100:7860", -- Base API endpoint (OpenAI-compatible)
+    api_key             = "",                          -- Bearer token (optional)
+    request_timeout     = 10,                          -- Network timeout in seconds
 
-    -- 2. Giọng đọc & Âm thanh
-    voice               = "vi-VN-NamMinh",             -- ID giọng đọc
-    speed               = 1.0,                         -- Tốc độ đọc (0.5 - 2.0)
+    -- 2. Voice & Audio
+    voice               = "vi-VN-NamMinh",             -- Voice identifier
+    speed               = 1.0,                         -- Playback speed (0.5 - 2.0)
     audio_backend       = "auto",                      -- "auto" | "android" | "mpv" | "aplay"
 
-    -- 3. Ngắt câu & Bộ đệm
+    -- 3. Chunking & Buffer
     chunk_mode          = "sentence",                  -- "sentence"
-    max_chunk_chars     = 300,                         -- Giới hạn ký tự tối đa một câu
-    preload_count       = 2,                           -- Số câu tải trước (1 - 3)
-    preload_cross_page  = true,                        -- Tải trước xuyên trang
+    max_chunk_chars     = 300,                         -- Maximum characters per chunk
+    preload_count       = 2,                           -- Number of chunks to preload (1 - 3)
+    preload_cross_page  = true,                        -- Preload across pages
 
-    -- 4. Trải nghiệm E-ink
+    -- 4. E-ink Experience
     highlight_mode      = "gray",                      -- "gray" | "underline" | "none"
-    auto_turn_page      = true,                        -- Tự động lật trang khi đọc hết trang
-    keep_screen_on      = true,                        -- Giữ màn hình sáng khi đang phát
-    filter_footnotes    = true,                        -- Lọc bỏ số trang và chú thích [1], *
+    auto_turn_page      = true,                        -- Auto turn page when page finished
+    keep_screen_on      = true,                        -- Prevent screen standby while playing
+    filter_footnotes    = true,                        -- Filter page numbers and footnotes [1], *
 
-    -- 5. Trạng thái phiên đọc gần nhất
-    last_book_id        = "",                          -- Định danh sách gần nhất
-    last_page           = 1,                           -- Trang đọc gần nhất
-    last_chunk_index    = 1,                           -- Vị trí câu đọc dở gần nhất
+    -- 5. Last session state
+    last_book_id        = "",                          -- Last book identifier (MD5 or path)
+    last_page           = 1,                           -- Last read page
+    last_chunk_index    = 1,                           -- Last read chunk index
 
-    -- 6. Từ điển phát âm & Mapping từ đọc (Pronunciation Dictionary)
-    custom_pronunciations = {},                        -- Bảng { [từ_gốc] = "từ_phát_âm" } do người dùng tùy biến
+    -- 6. Pronunciation dictionary & custom mappings
+    custom_pronunciations = {},                        -- Custom table { [orig_word] = "replacement" }
 }
 
--- Danh mục mặc định các từ viết tắt tiếng Việt chuẩn sang dạng phát âm đầy đủ cho TTS
+-- Default Vietnamese abbreviations to expanded pronunciation for TTS
 local DEFAULT_PRONUNCIATION_MAP = {
     ["TP."]     = "Thành phố",
     ["Tp."]     = "Thành phố",
@@ -71,8 +71,8 @@ local function deep_copy(orig)
     return copy
 end
 
---- Khởi tạo đối tượng quản lý Settings
--- @param storage_backend Đối tượng lưu trữ (mặc định sử dụng global G_reader_settings nếu nil)
+--- Initialize Settings instance
+-- @param storage_backend Storage backend (defaults to global G_reader_settings if nil)
 -- @return Settings instance
 function Settings:new(storage_backend)
     local instance = setmetatable({}, self)
@@ -84,7 +84,7 @@ function Settings:new(storage_backend)
             return instance.storage:readSetting(SETTING_KEY)
         end)
         if ok and type(saved) == "table" then
-            -- Hợp nhất dữ liệu đã lưu với schema mặc định (tự động bổ sung các key mới nếu có cập nhật)
+            -- Merge saved data with default schema (auto-populate new keys)
             for k, default_val in pairs(DEFAULT_SETTINGS) do
                 if saved[k] ~= nil and type(saved[k]) == type(default_val) then
                     instance.data[k] = deep_copy(saved[k])
@@ -96,9 +96,9 @@ function Settings:new(storage_backend)
     return instance
 end
 
---- Lấy giá trị của một khóa cấu hình
--- @param key Tên khóa
--- @return Giá trị cấu hình hoặc nil nếu không tồn tại
+--- Get value of a setting key
+-- @param key Setting key name
+-- @return Setting value or nil
 function Settings:get(key)
     if key == nil then return nil end
     local val = self.data[key]
@@ -108,16 +108,16 @@ function Settings:get(key)
     return DEFAULT_SETTINGS[key]
 end
 
---- Lấy bản sao toàn bộ bảng cấu hình
--- @return table Chứa toàn bộ cấu hình hiện tại
+--- Get a deep copy of all settings
+-- @return table Full settings table copy
 function Settings:getAll()
     return deep_copy(self.data)
 end
 
---- Cập nhật giá trị một khóa cấu hình kèm kiểm tra kiểu và biên độ hợp lệ
--- @param key Tên khóa
--- @param value Giá trị mới
--- @return boolean Thành công hay thất bại, string Thông báo lỗi nếu thất bại
+--- Set value of a setting key with validation and bounds clamping
+-- @param key Setting key name
+-- @param value New value
+-- @return boolean success, string error_message
 function Settings:set(key, value)
     if key == nil then
         return false, "Key cannot be nil"
@@ -131,22 +131,18 @@ function Settings:set(key, value)
         return false, string.format("Invalid type for %s: expected %s, got %s", key, expected_type, type(value))
     end
 
-    -- Kiểm tra ràng buộc và chuẩn hóa từng trường cụ thể
+    -- Specific clamping and normalization
     if key == "speed" then
-        -- Clamping tốc độ trong khoảng [0.5, 2.0]
         value = math.max(0.5, math.min(2.0, value))
     elseif key == "preload_count" then
-        -- Clamping số câu tải trước trong khoảng [1, 3]
         value = math.max(1, math.min(3, math.floor(value)))
     elseif key == "request_timeout" then
-        -- Clamping timeout trong khoảng [2, 60]
         value = math.max(2, math.min(60, value))
     elseif key == "max_chunk_chars" then
         value = math.max(50, math.min(1000, math.floor(value)))
     elseif key == "last_page" or key == "last_chunk_index" then
         value = math.max(1, math.floor(value))
     elseif key == "server_url" then
-        -- Loại bỏ ký tự gạch chéo cuối nếu có
         value = value:gsub("/+$", "")
     elseif key == "audio_backend" then
         local allowed = { auto = true, android = true, mpv = true, aplay = true }
@@ -159,7 +155,6 @@ function Settings:set(key, value)
             return false, "Invalid highlight_mode: " .. tostring(value)
         end
     elseif key == "voice" then
-        -- ponytail: static voice ID check, upgrade to dynamic list verification in Phase 3 via GET /v1/voices
         if type(value) ~= "string" or value == "" then
             return false, "Voice cannot be empty"
         end
@@ -169,9 +164,9 @@ function Settings:set(key, value)
     return true
 end
 
---- Ghi toàn bộ dữ liệu cấu hình vào bộ nhớ lưu trữ bền vững (G_reader_settings)
--- Bọc toàn bộ thao tác trong pcall để chống văng lỗi sập ứng dụng (Crash-proof)
--- @return boolean Thành công hay thất bại, string Lỗi nếu có
+--- Persist configuration to storage backend (G_reader_settings)
+-- Wrapped in pcall for crash resilience
+-- @return boolean success, string error_message
 function Settings:save()
     if not self.storage then
         return false, "No storage backend available"
@@ -194,18 +189,18 @@ function Settings:save()
     return true
 end
 
---- Khôi phục toàn bộ cấu hình về giá trị mặc định ban đầu
+--- Reset all settings to default schema values
 function Settings:resetDefaults()
     self.data = deep_copy(DEFAULT_SETTINGS)
     return true
 end
 
 -- =========================================================================
--- QUẢN LÝ TỪ ĐIỂN PHÁT ÂM (PRONUNCIATION DICTIONARY CRUD)
+-- PRONUNCIATION DICTIONARY CRUD
 -- =========================================================================
 
---- Lấy bảng hợp nhất tất cả các quy tắc mapping từ phát âm (Mặc định + Tùy biến)
--- @return table Bảng mapping { [từ_gốc] = "từ_phát_âm" }
+--- Get merged mapping table (Default + Custom)
+-- @return table Mapping table { [orig_word] = "replacement" }
 function Settings:getWordMappings()
     local merged = deep_copy(DEFAULT_PRONUNCIATION_MAP)
     local custom = self.data.custom_pronunciations or {}
@@ -215,16 +210,16 @@ function Settings:getWordMappings()
     return merged
 end
 
---- Lấy danh sách từ mapping do người dùng tự cấu hình
--- @return table Bảng sao chép các mapping tùy biến
+--- Get user custom pronunciation mappings
+-- @return table Copy of custom mappings
 function Settings:getCustomMappings()
     return deep_copy(self.data.custom_pronunciations or {})
 end
 
---- Thêm mới hoặc cập nhật một cặp từ phát âm tùy biến
--- @param word Từ gốc (viết tắt hoặc từ cần sửa)
--- @param replacement Từ phát âm thay thế
--- @return boolean Thành công hay thất bại, string Lỗi nếu có
+--- Add or update a custom pronunciation mapping
+-- @param word Original word / abbreviation
+-- @param replacement Spoken replacement text
+-- @return boolean success, string error_message
 function Settings:setWordMapping(word, replacement)
     if type(word) ~= "string" or word == "" then
         return false, "Word cannot be empty"
@@ -240,9 +235,9 @@ function Settings:setWordMapping(word, replacement)
     return true
 end
 
---- Xóa một từ khỏi danh mục tùy biến của người dùng
--- @param word Từ cần xóa
--- @return boolean Thành công hay thất bại
+--- Remove a word from custom pronunciation mappings
+-- @param word Word to remove
+-- @return boolean success
 function Settings:removeWordMapping(word)
     if type(word) ~= "string" or not self.data.custom_pronunciations then
         return false
@@ -251,13 +246,13 @@ function Settings:removeWordMapping(word)
     return true
 end
 
---- Xóa sạch danh sách từ tùy biến, khôi phục về từ điển mặc định ban đầu
+--- Reset custom mappings to default dictionary
 function Settings:resetWordMappings()
     self.data.custom_pronunciations = {}
     return true
 end
 
--- Export module và bảng schema mặc định (hỗ trợ kiểm thử)
+-- Export module and schema defaults for testing
 Settings.DEFAULT_SETTINGS = DEFAULT_SETTINGS
 Settings.DEFAULT_PRONUNCIATION_MAP = DEFAULT_PRONUNCIATION_MAP
 Settings.SETTING_KEY = SETTING_KEY
