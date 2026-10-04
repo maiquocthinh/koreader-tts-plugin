@@ -285,6 +285,23 @@ function MockKOReader.installGlobals()
     package.preload["ui/widget/button"] = function()
         return MockWidget
     end
+    package.preload["ui/widget/container/bottomcontainer"] = function()
+        return MockWidget
+    end
+    package.preload["ui/widget/container/centercontainer"] = function()
+        return MockWidget
+    end
+    package.preload["ui/widget/horizontalspan"] = function()
+        return MockWidget
+    end
+    package.preload["ui/widget/verticalspan"] = function()
+        return MockWidget
+    end
+    package.preload["ui/geometry"] = function()
+        return {
+            new = function(self, o) return o or {} end,
+        }
+    end
 
     _G.Screen = Screen
     _G.Blitbuffer = Blitbuffer

@@ -343,8 +343,9 @@ end
 -- Supports both Crengine (EPUB/MOBI) and MuPDF (PDF)
 -- @param document KOReader self.ui.document object (or mock)
 -- @param page_num Page number (1-based)
+-- @param ui KOReader self.ui object (optional)
 -- @return string raw text, table word bounding boxes
-function TextChunker:extractRawPageText(document, page_num)
+function TextChunker:extractRawPageText(document, page_num, ui)
     if not document then
         return "", {}
     end
@@ -352,7 +353,68 @@ function TextChunker:extractRawPageText(document, page_num)
     local text = ""
     local word_boxes = {}
 
-    -- 1. Try MuPDF API: getPageText & getTextWordBoxes
+    local function extractTextAndBoxes(res)
+        if not res then return nil, nil end
+        if type(res) == "string" and #res > 0 then
+            return res, {}
+        elseif type(res) == "table" then
+            local t = res.text
+            local b = res.word_boxes or res.boxes or {}
+            if type(t) == "string" and #t > 0 then
+                return t, b
+            end
+        end
+        return nil, nil
+    end
+
+    -- 1. Crengine on-screen text extraction (visible page in rolling mode)
+    local is_current_page = true
+    if ui and type(ui.getCurrentPage) == "function" and page_num then
+        local cur = ui:getCurrentPage()
+        if cur and cur > 0 and cur ~= page_num then
+            is_current_page = false
+        end
+    end
+
+    if is_current_page and (ui and ui.rolling or (document.getTextFromPositions and (not ui or not ui.paging))) then
+        local ok_d, Device = pcall(require, "device")
+        local Screen = (ok_d and Device and Device.screen) or (ui and ui.screen)
+        local sw = (Screen and type(Screen.getWidth) == "function" and Screen:getWidth()) or 1280
+        local sh = (Screen and type(Screen.getHeight) == "function" and Screen:getHeight()) or 720
+        local ok, res = pcall(document.getTextFromPositions, document, {x = 0, y = 0}, {x = sw, y = sh}, true)
+        if ok and res then
+            local t, b = extractTextAndBoxes(res)
+            if t and #t > 0 then
+                return t, b or {}
+            end
+        end
+    end
+
+    -- 2. PDF / DjVu structured word boxes (paged mode)
+    if (ui and ui.paging) or (type(document.getTextBoxes) == "function") then
+        local ok, page_boxes = pcall(document.getTextBoxes, document, page_num)
+        if ok and page_boxes and page_boxes[1] then
+            local lines = {}
+            local all_wbs = {}
+            for _, line in ipairs(page_boxes) do
+                local words = {}
+                for _, wb in ipairs(line) do
+                    if wb.word and wb.word ~= "" then
+                        table.insert(words, wb.word)
+                        table.insert(all_wbs, wb)
+                    end
+                end
+                if #words > 0 then
+                    table.insert(lines, table.concat(words, " "))
+                end
+            end
+            if #lines > 0 then
+                return table.concat(lines, "\n"), all_wbs
+            end
+        end
+    end
+
+    -- 3. Try MuPDF API: getPageText & getTextWordBoxes
     local ok_mupdf, res_text = pcall(function()
         if type(document.getPageText) == "function" then
             return document:getPageText(page_num)
@@ -368,26 +430,69 @@ function TextChunker:extractRawPageText(document, page_num)
         return text, word_boxes
     end
 
-    -- 2. Try Crengine API: getTextFromPositions & getWordBBoxes
+    -- 4. Crengine peek next view in rolling mode if page_num != current_page
+    if not is_current_page and ui and ui.rolling and type(document.getCurrentPos) == "function" and type(document.gotoPos) == "function" and type(document.getTextFromPositions) == "function" then
+        local ok_d, Device = pcall(require, "device")
+        local Screen = (ok_d and Device and Device.screen) or (ui and ui.screen)
+        local sw = (Screen and type(Screen.getWidth) == "function" and Screen:getWidth()) or 1280
+        local sh = (Screen and type(Screen.getHeight) == "function" and Screen:getHeight()) or 720
+        local ok_peek, peek_res = pcall(function()
+            local saved_pos = document:getCurrentPos()
+            local next_pos = saved_pos + sh
+            document:gotoPos(next_pos)
+            local ok_res, res = pcall(document.getTextFromPositions, document, {x = 0, y = 0}, {x = sw, y = sh}, true)
+            document:gotoPos(saved_pos)
+            if ok_res and res then
+                return extractTextAndBoxes(res)
+            end
+        end)
+        if ok_peek and peek_res and #peek_res > 0 then
+            return peek_res, {}
+        end
+    end
+
+    -- 5. Try Crengine XPointer API: getPageXPointer & getTextFromXPointers
+    local ok_xp, res_xp = pcall(function()
+        if type(document.getPageXPointer) == "function" and type(document.getTextFromXPointers) == "function" then
+            local xp0 = document:getPageXPointer(page_num)
+            if xp0 then
+                local xp1 = document:getPageXPointer(page_num + 1)
+                if xp1 then
+                    return document:getTextFromXPointers(xp0, xp1)
+                elseif type(document.getTextFromXPointer) == "function" then
+                    return document:getTextFromXPointer(xp0)
+                else
+                    return document:getTextFromXPointers(xp0, xp0)
+                end
+            end
+        end
+    end)
+    if ok_xp and res_xp then
+        local t, b = extractTextAndBoxes(res_xp)
+        if t and #t > 0 then
+            return t, b or {}
+        end
+    end
+
+    -- 6. Generic fallbacks: getTextFromPositions(page_num) or getText(page_num)
     local ok_cre, res_cre = pcall(function()
         if type(document.getTextFromPositions) == "function" then
             return document:getTextFromPositions(page_num)
         end
     end)
-    if ok_cre and type(res_cre) == "string" and #res_cre > 0 then
-        text = res_cre
-        pcall(function()
-            if type(document.getWordBBoxes) == "function" then
-                word_boxes = document:getWordBBoxes(page_num) or {}
-            end
-        end)
-        return text, word_boxes
+    if ok_cre and res_cre then
+        local t, b = extractTextAndBoxes(res_cre)
+        if t and #t > 0 then
+            return t, b or {}
+        end
     end
 
-    -- 3. Generic fallback
     if type(document.getText) == "function" then
         pcall(function()
-            text = document:getText(page_num) or ""
+            local t = document:getText(page_num)
+            if t and type(t) == "string" and #t > 0 then
+                text = t
+            end
         end)
     end
 
@@ -442,9 +547,10 @@ end
 -- Returns array of Chunk tables with Bounding Boxes
 -- @param document KOReader self.ui.document
 -- @param page_num Current page number
+-- @param ui KOReader self.ui (optional)
 -- @return table Array of Chunk objects
-function TextChunker:extractPageChunks(document, page_num)
-    local raw_page_text, word_boxes = self:extractRawPageText(document, page_num)
+function TextChunker:extractPageChunks(document, page_num, ui)
+    local raw_page_text, word_boxes = self:extractRawPageText(document, page_num, ui)
     if not raw_page_text or raw_page_text == "" then
         return {}
     end

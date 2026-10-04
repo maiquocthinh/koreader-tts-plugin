@@ -7,11 +7,29 @@
       - Two-way synchronization with PlaybackQueue
 --]]
 
-local WidgetContainer = require("ui/widget/widgetcontainer")
+local ok_wc, WidgetContainer = pcall(require, "ui/widget/container/widgetcontainer")
+if not ok_wc or not WidgetContainer then
+    WidgetContainer = require("ui/widget/widgetcontainer")
+end
 local UIManager = require("ui/uimanager")
 
-local ok_frame, FrameContainer = pcall(require, "ui/widget/framecontainer")
-if not ok_frame then FrameContainer = WidgetContainer end
+local ok_log, logger = pcall(require, "logger")
+if not ok_log or not logger then
+    logger = {
+        warn = function(...) end,
+        info = function(...) end,
+        dbg = function(...) end,
+        err = function(...) end,
+    }
+end
+
+local ok_frame, FrameContainer = pcall(require, "ui/widget/container/framecontainer")
+if not ok_frame or not FrameContainer then
+    ok_frame, FrameContainer = pcall(require, "ui/widget/framecontainer")
+end
+if not ok_frame or not FrameContainer then
+    FrameContainer = WidgetContainer
+end
 
 local ok_vg, VerticalGroup = pcall(require, "ui/widget/verticalgroup")
 if not ok_vg then VerticalGroup = WidgetContainer end
@@ -22,11 +40,43 @@ if not ok_hg then HorizontalGroup = WidgetContainer end
 local ok_btn, Button = pcall(require, "ui/widget/button")
 if not ok_btn then Button = WidgetContainer end
 
+local ok_bd, ButtonDialog = pcall(require, "ui/widget/buttondialog")
+if not ok_bd or not ButtonDialog then ButtonDialog = WidgetContainer end
+
 local ok_icon, IconButton = pcall(require, "ui/widget/iconbutton")
 if not ok_icon then IconButton = WidgetContainer end
 
 local ok_text, TextWidget = pcall(require, "ui/widget/textwidget")
 if not ok_text then TextWidget = WidgetContainer end
+
+local ok_bc, BottomContainer = pcall(require, "ui/widget/container/bottomcontainer")
+if not ok_bc or not BottomContainer then BottomContainer = WidgetContainer end
+
+local ok_cc, CenterContainer = pcall(require, "ui/widget/container/centercontainer")
+if not ok_cc or not CenterContainer then CenterContainer = WidgetContainer end
+
+local ok_hspan, HorizontalSpan = pcall(require, "ui/widget/horizontalspan")
+if not ok_hspan or not HorizontalSpan then
+    HorizontalSpan = WidgetContainer:extend{
+        width = 0,
+        getSize = function(self) return { w = self.width or 0, h = 0 } end,
+    }
+end
+
+local ok_vspan, VerticalSpan = pcall(require, "ui/widget/verticalspan")
+if not ok_vspan or not VerticalSpan then
+    VerticalSpan = WidgetContainer:extend{
+        width = 0,
+        getSize = function(self) return { w = 0, h = self.width or 0 } end,
+    }
+end
+
+local ok_geom, Geom = pcall(require, "ui/geometry")
+if not ok_geom or not Geom then
+    Geom = {
+        new = function(self, o) return o or {} end,
+    }
+end
 
 local ok_blit, Blitbuffer = pcall(require, "ffi/blitbuffer")
 if not ok_blit or not Blitbuffer then
@@ -37,9 +87,11 @@ if not ok_blit or not Blitbuffer then
     }
 end
 
-local ok_screen, Screen = pcall(require, "device/screen")
-if not ok_screen or not Screen then
-    Screen = {
+local ok_dev, Device = pcall(require, "device")
+local Screen = (ok_dev and Device and Device.screen) or _G.Screen
+if not Screen then
+    local ok_s, S = pcall(require, "device/screen")
+    Screen = ok_s and S or {
         getWidth = function() return 600 end,
         getHeight = function() return 800 end,
         scaleBySize = function(self, px) return px end,
@@ -59,11 +111,27 @@ if not ok_gettext or type(_) ~= "function" then
     _ = function(msg) return msg end
 end
 
+local ok_font, Font = pcall(require, "ui/font")
+if not ok_font or not Font then
+    Font = {
+        getFace = function(self, name, size)
+            return {
+                size = size or 14,
+                is_real_bold = false,
+                ftsize = {
+                    getHeightAndAscender = function() return size or 14 end
+                }
+            }
+        end
+    }
+end
+
 local SleepTimer = require("sleep_timer")
 
 local UIPlayer = WidgetContainer:extend{
     name = "koreader_tts_ui_player",
 }
+UIPlayer.__index = UIPlayer
 
 -- Playback speed presets for cycling
 local SPEED_LEVELS = { 0.8, 1.0, 1.2, 1.5, 2.0 }
@@ -165,131 +233,227 @@ function UIPlayer:showControlBar()
     local this = self
     local screen_w = Screen:getWidth()
     local screen_h = Screen:getHeight()
-    local bar_h = 135
 
-    -- 1. Row 1: Header (Progress title, Minimize button [—], Close button [✕])
+    -- 1. Row 1: Header (Progress title, Buffer status, [—], [✕])
     self.title_widget = TextWidget:new{
         text = string.format(_("Trang %d · Câu %d/%d"), self.current_page, self.current_index, self.total_on_page),
+        face = Font:getFace("cfont", 16),
+        bold = true,
+    }
+
+    self.buffer_status_widget = TextWidget:new{
+        text = _("Đệm: ●● (2 câu)"),
+        face = Font:getFace("cfont", 13),
     }
 
     local btn_minimize = Button:new{
-        text = " [—] ",
+        text = "  —  ",
+        bordersize = 0,
+        padding = 4,
         callback = function()
             this:toggleMode()
         end,
     }
+    self.btn_minimize = btn_minimize
 
     local btn_close = Button:new{
-        text = " [✕] ",
+        text = "  ✕  ",
+        bordersize = 0,
+        padding = 4,
         callback = function()
             this:onClose()
         end,
     }
+    self.btn_close = btn_close
 
     local header_row = HorizontalGroup:new{
+        align = "center",
         self.title_widget,
+        HorizontalSpan:new{ width = 20 },
+        self.buffer_status_widget,
+        HorizontalSpan:new{ width = 24 },
         btn_minimize,
+        HorizontalSpan:new{ width = 4 },
         btn_close,
     }
 
-    -- 2. Row 2: 5 Playback navigation control buttons
-    local btn_prev_page = IconButton:new{
-        icon = "backward_step",
-        text = "|<",
+    -- 2. Row 2: Navigation controls & Quick settings
+    local btn_prev_page = Button:new{
+        text = " |< ",
+        bordersize = Size.border.thin or 1,
+        padding = 6,
         callback = function()
             this:onPrevPage()
         end,
     }
+    self.btn_prev_page = btn_prev_page
 
-    local btn_prev_chunk = IconButton:new{
-        icon = "rewind",
-        text = "<<",
+    local btn_prev_chunk = Button:new{
+        text = " << ",
+        bordersize = Size.border.thin or 1,
+        padding = 6,
         callback = function()
             this:onPrevChunk()
         end,
     }
+    self.btn_prev_chunk = btn_prev_chunk
 
     local is_playing = self.playback_queue and (self.playback_queue:getState() == "PLAYING")
-    self.play_pause_btn = IconButton:new{
-        icon = is_playing and "pause" or "play",
-        text = is_playing and " || " or " ▶ ",
+    self.play_pause_btn = Button:new{
+        text = is_playing and "  ||  " or "  ▶  ",
+        bordersize = Size.border.thin or 1,
+        padding = 6,
         callback = function()
             this:onTogglePlayPause()
         end,
     }
 
-    local btn_next_chunk = IconButton:new{
-        icon = "fastforward",
-        text = ">>",
+    local btn_next_chunk = Button:new{
+        text = " >> ",
+        bordersize = Size.border.thin or 1,
+        padding = 6,
         callback = function()
             this:onNextChunk()
         end,
     }
+    self.btn_next_chunk = btn_next_chunk
 
-    local btn_next_page = IconButton:new{
-        icon = "forward_step",
-        text = ">|",
+    local btn_next_page = Button:new{
+        text = " >| ",
+        bordersize = Size.border.thin or 1,
+        padding = 6,
         callback = function()
             this:onNextPage()
         end,
     }
+    self.btn_next_page = btn_next_page
 
-    local controls_row = HorizontalGroup:new{
-        btn_prev_page,
-        btn_prev_chunk,
-        self.play_pause_btn,
-        btn_next_chunk,
-        btn_next_page,
-    }
-
-    -- 3. Row 3: Footer (Speed selector, Sleep timer, Voice, Buffer status)
     local cur_speed = self.audio_backend and self.audio_backend.speed or 1.0
     self.speed_btn = Button:new{
         text = string.format(_("Tốc độ: %.1fx"), cur_speed),
+        bordersize = Size.border.thin or 1,
+        padding = 6,
         callback = function()
-            this:onCycleSpeed()
+            this:showSpeedDialog()
         end,
     }
 
     self.sleep_timer_btn = Button:new{
         text = self.sleep_timer and self.sleep_timer:getDisplayText() or _("Hẹn giờ: Tắt"),
+        bordersize = Size.border.thin or 1,
+        padding = 6,
         callback = function()
-            this:onCycleSleepTimer()
+            this:showSleepTimerDialog()
         end,
     }
 
-    local cur_voice = self.settings and self.settings:get("voice") or "vi-VN-NamMinh"
-    local voice_text = TextWidget:new{
-        text = string.format(_("Giọng: %s"), cur_voice),
-    }
-
-    self.buffer_status_widget = TextWidget:new{
-        text = _("Đệm: ●● (2 câu)"),
-    }
-
-    local footer_row = HorizontalGroup:new{
+    local controls_row = HorizontalGroup:new{
+        align = "center",
+        btn_prev_page,
+        HorizontalSpan:new{ width = 6 },
+        btn_prev_chunk,
+        HorizontalSpan:new{ width = 6 },
+        self.play_pause_btn,
+        HorizontalSpan:new{ width = 6 },
+        btn_next_chunk,
+        HorizontalSpan:new{ width = 6 },
+        btn_next_page,
+        HorizontalSpan:new{ width = 18 },
         self.speed_btn,
+        HorizontalSpan:new{ width = 8 },
         self.sleep_timer_btn,
-        voice_text,
-        self.buffer_status_widget,
     }
 
-    -- Root frame: 1px border FrameContainer
-    local group = VerticalGroup:new{
+    local content_group = VerticalGroup:new{
+        align = "center",
+        VerticalSpan:new{ width = 4 },
         header_row,
+        VerticalSpan:new{ width = 8 },
         controls_row,
-        footer_row,
+        VerticalSpan:new{ width = 4 },
     }
 
-    self.control_bar = FrameContainer:new{
+    local card = FrameContainer:new{
+        margin = 0,
         bordersize = Size.border.thin or 1,
         background = Blitbuffer.COLOR_WHITE,
-        dimen = { x = 0, y = screen_h - bar_h, w = screen_w, h = bar_h },
-        group,
+        padding = 8,
+        radius = 6,
+        content_group,
     }
+    self.card_container = card
+
+    local screen_geom = (Screen and type(Screen.getSize) == "function" and Screen:getSize()) or Geom:new{ w = screen_w, h = screen_h }
+    self.control_bar = BottomContainer:new{
+        dimen = screen_geom,
+        card,
+    }
+
+    -- Direct hit-testing gesture handler: guarantees taps are intercepted reliably
+    self.control_bar.handleEvent = function(cbar, event)
+        local arg1 = event.args and event.args[1]
+        local is_gesture = event.handler == "onGesture" or (type(arg1) == "table" and arg1.ges)
+        if is_gesture then
+            local ges = type(arg1) == "table" and arg1 or nil
+            if ges and ges.pos and ges.ges == "tap" then
+                local pos = ges.pos
+                if this:_isTapOnWidget(pos, this.btn_close) then
+                    this:onClose()
+                    return true
+                end
+                if this:_isTapOnWidget(pos, this.play_pause_btn) then
+                    this:onTogglePlayPause()
+                    return true
+                end
+                if this:_isTapOnWidget(pos, this.btn_prev_chunk) then
+                    this:onPrevChunk()
+                    return true
+                end
+                if this:_isTapOnWidget(pos, this.btn_next_chunk) then
+                    this:onNextChunk()
+                    return true
+                end
+                if this:_isTapOnWidget(pos, this.btn_prev_page) then
+                    this:onPrevPage()
+                    return true
+                end
+                if this:_isTapOnWidget(pos, this.btn_next_page) then
+                    this:onNextPage()
+                    return true
+                end
+                if this:_isTapOnWidget(pos, this.speed_btn) then
+                    this:showSpeedDialog()
+                    return true
+                end
+                if this:_isTapOnWidget(pos, this.sleep_timer_btn) then
+                    this:showSleepTimerDialog()
+                    return true
+                end
+                if this:_isTapOnWidget(pos, this.btn_minimize) then
+                    this:toggleMode()
+                    return true
+                end
+                -- Absorb any tap inside the player card frame so it never leaks to reader gestures
+                if this:_isTapOnWidget(pos, this.card_container) then
+                    return true
+                end
+            end
+        end
+        return BottomContainer.handleEvent(cbar, event)
+    end
 
     UIManager:show(self.control_bar)
     self:_updateBufferStatus()
+end
+
+--- Hit test a screen position against a widget's rendered dimensions
+function UIPlayer:_isTapOnWidget(pos, widget)
+    if not widget or not pos then return false end
+    local d = widget.dimen or (widget[1] and widget[1].dimen)
+    if not d or not d.x or not d.y or not d.w or not d.h then return false end
+    local pad = 12
+    return pos.x >= (d.x - pad) and pos.x <= (d.x + d.w + pad)
+        and pos.y >= (d.y - pad) and pos.y <= (d.y + d.h + pad)
 end
 
 --- Hide Floating Control Bar
@@ -302,6 +466,13 @@ function UIPlayer:hideControlBar()
         self.sleep_timer_btn = nil
         self.title_widget = nil
         self.buffer_status_widget = nil
+        self.btn_minimize = nil
+        self.btn_close = nil
+        self.btn_prev_page = nil
+        self.btn_prev_chunk = nil
+        self.btn_next_chunk = nil
+        self.btn_next_page = nil
+        self.card_container = nil
     end
 end
 
@@ -314,13 +485,12 @@ function UIPlayer:showMiniBubble()
     local this = self
     local screen_w = Screen:getWidth()
     local screen_h = Screen:getHeight()
-    local bubble_w = 140
-    local bubble_h = 42
 
     local is_playing = self.playback_queue and (self.playback_queue:getState() == "PLAYING")
-    self.mini_play_btn = IconButton:new{
-        icon = is_playing and "pause" or "play",
-        text = is_playing and "||" or "▶",
+    self.mini_play_btn = Button:new{
+        text = is_playing and " || " or " ▶ ",
+        bordersize = 0,
+        padding = 4,
         callback = function()
             this:onTogglePlayPause()
         end,
@@ -329,6 +499,8 @@ function UIPlayer:showMiniBubble()
     local cur_speed = self.audio_backend and self.audio_backend.speed or 1.0
     self.mini_label_btn = Button:new{
         text = string.format("%d/%d · %.1fx", self.current_index, self.total_on_page, cur_speed),
+        bordersize = 0,
+        padding = 4,
         callback = function()
             -- Tap text label to restore full control bar
             this:toggleMode()
@@ -336,21 +508,47 @@ function UIPlayer:showMiniBubble()
     }
 
     local bubble_group = HorizontalGroup:new{
+        align = "center",
         self.mini_play_btn,
+        HorizontalSpan:new{ width = 6 },
         self.mini_label_btn,
     }
 
-    self.mini_bubble = FrameContainer:new{
+    local card = FrameContainer:new{
         bordersize = Size.border.thin or 1,
         background = Blitbuffer.COLOR_WHITE,
-        dimen = {
-            x = screen_w - bubble_w - 15,
-            y = screen_h - bubble_h - 25,
-            w = bubble_w,
-            h = bubble_h,
-        },
+        padding = 6,
+        radius = 4,
         bubble_group,
     }
+    self.mini_card_container = card
+
+    local screen_geom = (Screen and type(Screen.getSize) == "function" and Screen:getSize()) or Geom:new{ w = screen_w, h = screen_h }
+    self.mini_bubble = BottomContainer:new{
+        dimen = screen_geom,
+        card,
+    }
+
+    self.mini_bubble.handleEvent = function(mb, event)
+        local arg1 = event.args and event.args[1]
+        local is_gesture = event.handler == "onGesture" or (type(arg1) == "table" and arg1.ges)
+        if is_gesture then
+            local ges = type(arg1) == "table" and arg1 or nil
+            if ges and ges.pos and ges.ges == "tap" then
+                local pos = ges.pos
+                if this:_isTapOnWidget(pos, this.mini_play_btn) then
+                    this:onTogglePlayPause()
+                    return true
+                end
+                -- Tapping anywhere else on the mini bubble expands back to full control bar
+                if this:_isTapOnWidget(pos, this.mini_card_container) then
+                    this:toggleMode()
+                    return true
+                end
+            end
+        end
+        return BottomContainer.handleEvent(mb, event)
+    end
 
     UIManager:show(self.mini_bubble)
 end
@@ -362,6 +560,7 @@ function UIPlayer:hideMiniBubble()
         self.mini_bubble = nil
         self.mini_play_btn = nil
         self.mini_label_btn = nil
+        self.mini_card_container = nil
     end
 end
 
@@ -461,16 +660,19 @@ end
 --- Update Play/Pause icon across active widgets
 function UIPlayer:_updatePlayPauseIcon()
     local is_playing = self.playback_queue and (self.playback_queue:getState() == "PLAYING")
-    local icon = is_playing and "pause" or "play"
-    local label = is_playing and " || " or " ▶ "
+    local label = is_playing and "  ||  " or "  ▶  "
 
     if self.play_pause_btn then
-        if self.play_pause_btn.setIcon then self.play_pause_btn:setIcon(icon) end
         if self.play_pause_btn.setText then self.play_pause_btn:setText(label) end
     end
     if self.mini_play_btn then
-        if self.mini_play_btn.setIcon then self.mini_play_btn:setIcon(icon) end
-        if self.mini_play_btn.setText then self.mini_play_btn:setText(is_playing and "||" or "▶") end
+        if self.mini_play_btn.setText then self.mini_play_btn:setText(is_playing and " || " or " ▶ ") end
+    end
+    if self.control_bar and UIManager and UIManager.setDirty then
+        pcall(UIManager.setDirty, UIManager, self.control_bar, "ui")
+    end
+    if self.mini_bubble and UIManager and UIManager.setDirty then
+        pcall(UIManager.setDirty, UIManager, self.mini_bubble, "ui")
     end
 end
 
@@ -523,6 +725,13 @@ function UIPlayer:onChunkChange(chunk, page, index, total)
     -- 3. Update buffer & play/pause icon
     self:_updateBufferStatus()
     self:_updatePlayPauseIcon()
+
+    -- 4. Refresh control bar UI
+    if self.control_bar and UIManager.setDirty then
+        pcall(UIManager.setDirty, UIManager, self.control_bar, "ui")
+    elseif self.mini_bubble and UIManager.setDirty then
+        pcall(UIManager.setDirty, UIManager, self.mini_bubble, "ui")
+    end
 end
 
 --- Event callback when FSM state changes
@@ -591,7 +800,88 @@ function UIPlayer:onPrevPage()
     end
 end
 
---- Cycle playback speed presets (0.8x -> 1.0x -> 1.2x -> 1.5x -> 2.0x)
+--- Show popup dialog to choose playback speed directly
+function UIPlayer:showSpeedDialog()
+    local this = self
+    local cur_speed = self.audio_backend and self.audio_backend.speed or 1.0
+    local dialog
+
+    local function selectSpeed(spd)
+        if this.audio_backend then
+            this.audio_backend:setSpeed(spd)
+        end
+        if this.settings then
+            this.settings:set("speed", spd)
+            this.settings:save()
+        end
+        if this.speed_btn and this.speed_btn.setText then
+            this.speed_btn:setText(string.format(_("Tốc độ: %.1fx"), spd))
+        end
+        if this.mini_label_btn and this.mini_label_btn.setText then
+            this.mini_label_btn:setText(string.format("%d/%d · %.1fx", this.current_index, this.total_on_page, spd))
+        end
+        if this.control_bar and UIManager and UIManager.setDirty then
+            pcall(UIManager.setDirty, UIManager, this.control_bar, "ui")
+        end
+        if dialog then
+            UIManager:close(dialog)
+        end
+    end
+
+    local buttons = {
+        {
+            {
+                text = "0.75x",
+                checked_func = function() return math.abs(cur_speed - 0.75) < 0.05 end,
+                callback = function() selectSpeed(0.75) end,
+            },
+            {
+                text = _("1.0x (Mặc định)"),
+                checked_func = function() return math.abs(cur_speed - 1.0) < 0.05 end,
+                callback = function() selectSpeed(1.0) end,
+            },
+        },
+        {
+            {
+                text = "1.25x",
+                checked_func = function() return math.abs(cur_speed - 1.25) < 0.05 end,
+                callback = function() selectSpeed(1.25) end,
+            },
+            {
+                text = "1.5x",
+                checked_func = function() return math.abs(cur_speed - 1.5) < 0.05 end,
+                callback = function() selectSpeed(1.5) end,
+            },
+        },
+        {
+            {
+                text = "1.75x",
+                checked_func = function() return math.abs(cur_speed - 1.75) < 0.05 end,
+                callback = function() selectSpeed(1.75) end,
+            },
+            {
+                text = "2.0x",
+                checked_func = function() return math.abs(cur_speed - 2.0) < 0.05 end,
+                callback = function() selectSpeed(2.0) end,
+            },
+        },
+        {
+            {
+                text = _("Đóng"),
+                callback = function()
+                    if dialog then UIManager:close(dialog) end
+                end,
+            },
+        },
+    }
+
+    dialog = ButtonDialog:new{
+        title = _("Chọn tốc độ đọc (TTS Speed)"),
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+end
+
 function UIPlayer:onCycleSpeed()
     local cur_speed = self.audio_backend and self.audio_backend.speed or 1.0
     local next_speed = SPEED_LEVELS[1]
@@ -619,7 +909,80 @@ function UIPlayer:onCycleSpeed()
     end
 end
 
---- Cycle sleep timer mode presets (Off -> 15m -> 30m -> 45m -> End of page)
+--- Show popup dialog to choose sleep timer directly
+function UIPlayer:showSleepTimerDialog()
+    local this = self
+    if not self.sleep_timer then return end
+    local cur_mode = tostring(self.sleep_timer:getMode())
+    local dialog
+
+    local function selectTimer(mode)
+        this.sleep_timer:setMode(mode)
+        if this.sleep_timer_btn and this.sleep_timer_btn.setText then
+            this.sleep_timer_btn:setText(this.sleep_timer:getDisplayText())
+        end
+        if this.control_bar and UIManager and UIManager.setDirty then
+            pcall(UIManager.setDirty, UIManager, this.control_bar, "ui")
+        end
+        if dialog then
+            UIManager:close(dialog)
+        end
+    end
+
+    local buttons = {
+        {
+            {
+                text = _("Tắt hẹn giờ"),
+                checked_func = function() return cur_mode == "0" end,
+                callback = function() selectTimer("0") end,
+            },
+            {
+                text = _("15 phút"),
+                checked_func = function() return cur_mode == "15" end,
+                callback = function() selectTimer("15") end,
+            },
+        },
+        {
+            {
+                text = _("30 phút"),
+                checked_func = function() return cur_mode == "30" end,
+                callback = function() selectTimer("30") end,
+            },
+            {
+                text = _("45 phút"),
+                checked_func = function() return cur_mode == "45" end,
+                callback = function() selectTimer("45") end,
+            },
+        },
+        {
+            {
+                text = _("60 phút"),
+                checked_func = function() return cur_mode == "60" end,
+                callback = function() selectTimer("60") end,
+            },
+            {
+                text = _("Hết trang hiện tại"),
+                checked_func = function() return cur_mode == "page" end,
+                callback = function() selectTimer("page") end,
+            },
+        },
+        {
+            {
+                text = _("Đóng"),
+                callback = function()
+                    if dialog then UIManager:close(dialog) end
+                end,
+            },
+        },
+    }
+
+    dialog = ButtonDialog:new{
+        title = _("Hẹn giờ tắt đọc (Sleep Timer)"),
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+end
+
 function UIPlayer:onCycleSleepTimer()
     if not self.sleep_timer then return end
     local modes = { "0", "15", "30", "45", "page" }

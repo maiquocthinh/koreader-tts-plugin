@@ -12,7 +12,7 @@ end
 return {
     name = "koreader_tts",
     fullname = _("TTS Reader"),
-    description = _("Đọc sách bằng giọng nói tiếng Việt qua REST API (OpenAI-compatible)"),
+    description = _("Đọc sách bằng giọng nói qua REST API (OpenAI-compatible)"),
     category = "read",
     version = "0.1.0",
 }

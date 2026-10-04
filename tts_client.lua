@@ -77,6 +77,11 @@ end
 -- @param url URL string (e.g. http://192.168.1.100:7860/v1/audio/speech)
 -- @return table { scheme, host, port, path }
 local function parse_url(url)
+    if not url or url == "" then
+        url = "http://192.168.1.100:7860"
+    end
+    url = url:gsub("^%s+", ""):gsub("%s+$", "")
+
     local scheme, rest = url:match("^(https?)://(.*)$")
     scheme = scheme or "http"
     rest = rest or url
@@ -91,6 +96,11 @@ local function parse_url(url)
         port = tonumber(port)
     else
         port = (scheme == "https") and 443 or 80
+    end
+
+    -- Strip trailing slashes from path if length > 1
+    if #path > 1 then
+        path = path:gsub("/+$", "")
     end
 
     -- If path is root "/" and endpoint doesn't point to speech, append default path
@@ -282,6 +292,39 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
     })
 
     local url_info = parse_url(server_url)
+
+    -- 4. Tier 1: Prioritize in-process LuaSocket (+ LuaSec for HTTPS) with non-blocking coroutines
+    -- This runs in cooperative 20ms slices without blocking the main UI thread or spawning subprocesses,
+    -- completely preventing Android ANRs ("KOReader isn't responding").
+    local ok_socket, socket = pcall(require, "socket")
+    local ok_ssl = true
+    if url_info.scheme == "https" then
+        local has_ssl, ssl = pcall(require, "ssl")
+        ok_ssl = has_ssl and ssl and type(ssl.wrap) == "function"
+    end
+
+    if ok_socket and socket and socket.tcp and ok_ssl then
+        self:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav_path, final_wav_path, function(ok, res)
+            if is_cancelled then return end
+            if ok then
+                if callback then callback(true, res) end
+            else
+                -- If socket fetch failed, fallback to curl
+                self:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav_path, final_wav_path, callback)
+            end
+        end, function() return is_cancelled end)
+        return cancel_handle
+    end
+
+    -- 5. Tier 2: Fallback to curl when LuaSocket/LuaSec is unavailable
+    self:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav_path, final_wav_path, callback)
+    return cancel_handle
+end
+
+--- Internal socket fetch implementation with coroutine non-blocking streaming
+function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav_path, final_wav_path, callback, is_cancelled_fn)
+    local socket = require("socket")
+
     local headers = {
         string.format("POST %s HTTP/1.1", url_info.path),
         string.format("Host: %s", url_info.host),
@@ -295,40 +338,18 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
     end
     local request_header_str = table.concat(headers, "\r\n") .. "\r\n\r\n"
 
-    -- 4. Check socket availability
-    local ok_socket, socket = pcall(require, "socket")
-    if not ok_socket or not socket or not socket.tcp then
-        -- Fallback via curl if socket binary is unavailable (e.g. test runner)
-        self:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav_path, final_wav_path, callback)
-        return cancel_handle
-    end
-
-    -- 5. Non-blocking I/O via Coroutine + Socket Polling
     local co = coroutine.create(function()
         local tcp = socket.tcp()
-        tcp:settimeout(0) -- Non-blocking mode
-
         local start_time = os.time()
 
-        -- Step 5.1: Connect to server
+        -- Connect with a small timeout (5s) to avoid non-blocking "operation already in progress" error
+        tcp:settimeout(math.min(timeout, 5))
         local conn_ok, conn_err = tcp:connect(url_info.host, url_info.port)
-        while not conn_ok and conn_err == "timeout" do
-            if os.time() - start_time > timeout then
-                tcp:close()
-                return false, "Hết thời gian kết nối (Connection timeout)"
-            end
-            coroutine.yield()
-            conn_ok, conn_err = tcp:connect(url_info.host, url_info.port)
-            if conn_err == "already connected" then
-                conn_ok = 1
-                break
-            end
-        end
-
-        if not conn_ok and conn_err ~= "already connected" then
+        if not conn_ok then
             tcp:close()
             return false, "Lỗi kết nối tới " .. url_info.host .. ":" .. url_info.port .. " (" .. tostring(conn_err) .. ")"
         end
+        tcp:settimeout(0) -- Switch to non-blocking mode for I/O
 
         -- Wrap in SSL if HTTPS
         if url_info.scheme == "https" then
@@ -342,16 +363,9 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
                 }
                 tcp = ssl.wrap(tcp, ssl_params)
                 tcp:sni(url_info.host)
-                tcp:settimeout(0)
+                tcp:settimeout(math.min(timeout, 5))
                 local hs_ok, hs_err = tcp:dohandshake()
-                while not hs_ok and (hs_err == "timeout" or hs_err == "wantread" or hs_err == "wantwrite") do
-                    if os.time() - start_time > timeout then
-                        tcp:close()
-                        return false, "Hết thời gian bắt tay SSL (Handshake timeout)"
-                    end
-                    coroutine.yield()
-                    hs_ok, hs_err = tcp:dohandshake()
-                end
+                tcp:settimeout(0)
                 if not hs_ok then
                     tcp:close()
                     return false, "Lỗi bắt tay SSL: " .. tostring(hs_err)
@@ -362,7 +376,7 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
             end
         end
 
-        -- Step 5.2: Send Request Headers and Body
+        -- Send headers and payload
         local full_request = request_header_str .. payload
         local total_sent = 0
         while total_sent < #full_request do
@@ -382,7 +396,7 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
             end
         end
 
-        -- Step 5.3: Read HTTP Response Headers
+        -- Read HTTP response headers
         local response_buffer = ""
         local header_end = nil
         while not header_end do
@@ -413,23 +427,24 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
             local chunk, _, partial = tcp:receive("*a")
             local err_body = chunk or partial or ""
             tcp:close()
+            if err_body:find("Unknown voice") or err_body:find("voice") then
+                return false, string.format("Lỗi giọng đọc: Máy chủ không hỗ trợ giọng này.\nChi tiết: %s\nVui lòng kiểm tra lại cấu hình giọng đọc trong Cài đặt.", err_body)
+            end
             return false, string.format("Máy chủ TTS phản hồi lỗi HTTP %s: %s", tostring(status_code or "Unknown"), tostring(err_body))
         end
 
-        -- Step 5.4: Read binary WAV stream and write atomically to .tmp file
+        -- Read binary stream into file
         local out_file, file_err = io.open(temp_wav_path, "wb")
         if not out_file then
             tcp:close()
             return false, "Không thể mở file tạm để ghi: " .. tostring(file_err)
         end
 
-        local total_bytes = 0
         while true do
             local chunk, recv_err, partial = tcp:receive(4096)
             local data = chunk or partial
             if data and #data > 0 then
                 out_file:write(data)
-                total_bytes = total_bytes + #data
             end
 
             if chunk == nil and recv_err == "closed" then
@@ -454,29 +469,24 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
         out_file:close()
         tcp:close()
 
-        -- Step 5.5: Validate WAV file (verify 4-byte RIFF magic)
+        -- Verify RIFF magic
         local verify_file = io.open(temp_wav_path, "rb")
-        if not verify_file then
-            return false, "Không tìm thấy file sau khi tải"
-        end
+        if not verify_file then return false, "Không tìm thấy file sau khi tải" end
         local magic = verify_file:read(4)
         verify_file:close()
 
         if magic ~= "RIFF" then
             os.remove(temp_wav_path)
-            return false, "Dữ liệu máy chủ trả về không phải định dạng WAV hợp lệ (thiếu header RIFF)"
+            return false, "Dữ liệu trả về không phải âm thanh WAV hợp lệ (thiếu RIFF header)"
         end
 
-        -- Atomic rename from .tmp to .wav
         os.remove(final_wav_path)
         os.rename(temp_wav_path, final_wav_path)
-
         return true, final_wav_path
     end)
 
-    -- Pump runner using UIManager:scheduleIn() to yield CPU to UI thread
     local function pump()
-        if is_cancelled then
+        if is_cancelled_fn and is_cancelled_fn() then
             os.remove(temp_wav_path)
             return
         end
@@ -484,31 +494,26 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
         local ok, success_or_cont, result_or_err = coroutine.resume(co)
         if not ok then
             os.remove(temp_wav_path)
-            if not is_cancelled and callback then callback(false, "Lỗi thực thi coroutine: " .. tostring(success_or_cont)) end
+            if callback then callback(false, "Lỗi coroutine: " .. tostring(success_or_cont)) end
             return
         end
 
         if coroutine.status(co) == "dead" then
-            local is_success = success_or_cont
-            local res = result_or_err
-            if not is_cancelled and callback then callback(is_success, res) end
+            if callback then callback(success_or_cont, result_or_err) end
         else
-            if not is_cancelled then
+            if UIManager and type(UIManager.scheduleIn) == "function" then
                 UIManager:scheduleIn(0.02, pump)
-            else
-                os.remove(temp_wav_path)
             end
         end
     end
 
     pump()
-    return cancel_handle
 end
 
---- Fallback implementation using curl when luasocket binary is unavailable
+--- Fallback implementation using curl (handles TLS, SNI, self-signed certs, redirects)
 function TTSClient:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav_path, final_wav_path, callback)
     local tmp_json = temp_wav_path .. ".json"
-    local jf = io.open(tmp_json, "w")
+    local jf = io.open(tmp_json, "wb")
     if jf then
         jf:write(payload)
         jf:close()
@@ -518,29 +523,106 @@ function TTSClient:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav
     local full_endpoint = string.format("%s://%s:%d%s", url_info.scheme, url_info.host, url_info.port, url_info.path)
 
     local auth_header = (api_key and api_key ~= "") and string.format('-H "Authorization: Bearer %s"', api_key) or ""
+    -- Flags:
+    --   -s: silent
+    --   -k: insecure (skip CA cert verification for device environments)
+    --   -L: follow HTTP redirects (301, 302, 307)
+    --   --data-binary: send exact UTF-8 payload with newlines preserved
     local curl_cmd = string.format(
-        'curl -s -X POST "%s" -H "Content-Type: application/json" %s -d @"%s" -o "%s" --max-time %d',
+        'curl -s -k -L -X POST "%s" -H "Content-Type: application/json" -H "User-Agent: KOReader-TTS/1.0" %s --data-binary @"%s" -o "%s" --max-time %d >/dev/null 2>&1',
         full_endpoint, auth_header, tmp_json, temp_wav_path, timeout
     )
 
-    UIManager:scheduleIn(0.05, function()
-        local ok_exec = os.execute(curl_cmd)
+    local exit_marker = temp_wav_path .. ".exit"
+    os.remove(exit_marker)
+
+    local function checkResult()
         os.remove(tmp_json)
+        os.remove(exit_marker)
 
         local verify_file = io.open(temp_wav_path, "rb")
         if verify_file then
-            local magic = verify_file:read(4)
+            local header = verify_file:read(12)
             verify_file:close()
-            if magic == "RIFF" then
+            if header and #header >= 12 and header:sub(1, 4) == "RIFF" and header:sub(9, 12) == "WAVE" then
                 os.remove(final_wav_path)
                 os.rename(temp_wav_path, final_wav_path)
                 if callback then callback(true, final_wav_path) end
                 return
             end
+
+            -- Not a valid WAV file: read server error response body
+            local ef = io.open(temp_wav_path, "r")
+            local err_body = ef and ef:read(500) or ""
+            if ef then ef:close() end
+            os.remove(temp_wav_path)
+
+            if err_body:find("Unknown voice") or err_body:find("voice") then
+                if callback then
+                    callback(false, string.format("Lỗi giọng đọc: Máy chủ không hỗ trợ giọng này.\nChi tiết: %s\nVui lòng vào 'Cài đặt máy chủ & Giọng đọc' để chọn lại giọng phù hợp.", err_body))
+                end
+                return
+            end
+
+            if callback then
+                callback(false, string.format("Máy chủ phản hồi lỗi: %s", err_body ~= "" and err_body or "Dữ liệu trả về không phải âm thanh WAV"))
+            end
+            return
         end
+
         os.remove(temp_wav_path)
-        if callback then callback(false, "Lỗi tải âm thanh từ server qua cURL") end
-    end)
+        if callback then
+            callback(false, "Không thể kết nối đến máy chủ TTS (kết nối thất bại hoặc hết thời gian)")
+        end
+    end
+
+    if package.config:sub(1, 1) == "\\" then
+        -- Windows desktop fallback (synchronous for local unit tests)
+        if UIManager and type(UIManager.scheduleIn) == "function" then
+            UIManager:scheduleIn(0.02, function()
+                pcall(os.execute, curl_cmd)
+                checkResult()
+            end)
+        else
+            pcall(os.execute, curl_cmd)
+            checkResult()
+        end
+    else
+        -- Unix / Linux / Android / E-ink: asynchronous background curl prevents UI thread freeze & ANR
+        local bg_cmd = string.format('(%s; echo $? > "%s") &', curl_cmd, exit_marker)
+        pcall(os.execute, bg_cmd)
+
+        local start_poll = (UIManager and UIManager.getTime and UIManager:getTime()) or os.time()
+        local function poll()
+            local ef = io.open(exit_marker, "r")
+            if ef then
+                ef:close()
+                checkResult()
+                return
+            end
+
+            local now = (UIManager and UIManager.getTime and UIManager:getTime()) or os.time()
+            if (now - start_poll) > (timeout + 2) then
+                os.remove(exit_marker)
+                os.remove(temp_wav_path)
+                os.remove(tmp_json)
+                if callback then callback(false, "Hết thời gian tải file âm thanh (timeout)") end
+                return
+            end
+
+            if UIManager and type(UIManager.scheduleIn) == "function" then
+                UIManager:scheduleIn(0.05, poll)
+            else
+                checkResult()
+            end
+        end
+
+        if UIManager and type(UIManager.scheduleIn) == "function" then
+            UIManager:scheduleIn(0.05, poll)
+        else
+            checkResult()
+        end
+    end
 end
 
 -- Export helper functions for testing

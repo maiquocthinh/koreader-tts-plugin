@@ -4,7 +4,17 @@
     Inherits from WidgetContainer, manages plugin lifecycle and menu integration.
 --]]
 
-local WidgetContainer = require("ui/widget/widgetcontainer")
+-- Ensure plugin directory is in package.path so internal modules can be required
+local plugin_path = debug.getinfo(1, "S").source:match("@?(.*[/\\\\])")
+if plugin_path and not package.path:find(plugin_path, 1, true) then
+    package.path = plugin_path .. "?.lua;" .. plugin_path .. "?/init.lua;" .. package.path
+end
+
+local ok_wc, WidgetContainer = pcall(require, "ui/widget/container/widgetcontainer")
+if not ok_wc or not WidgetContainer then
+    WidgetContainer = require("ui/widget/widgetcontainer")
+end
+
 local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
@@ -28,6 +38,10 @@ local KoreaderTTS = WidgetContainer:extend{
 
 --- Initialize plugin when loaded into KOReader
 function KoreaderTTS:init()
+    local ok_log, logger = pcall(require, "logger")
+    if ok_log and logger and logger.warn then
+        logger.warn("KoreaderTTS:init() called! ui=", tostring(self.ui))
+    end
     self.settings = Settings:new()
     self.tts_client = TTSClient:new{
         server_url = self.settings:get("server_url"),
@@ -109,7 +123,38 @@ function KoreaderTTS:init()
 
     if self.ui and self.ui.menu and type(self.ui.menu.registerToMainMenu) == "function" then
         self.ui.menu:registerToMainMenu(self)
+        self.ui.menu.tab_item_table = nil
     end
+
+    if self.ui and self.ui.dictionary and type(self.ui.dictionary.addToDictButtons) == "function" then
+        self.ui.dictionary:addToDictButtons({
+            id = "koreader_tts_read",
+            text = _("▶ Đọc từ đây (TTS)"),
+            font_bold = true,
+            callback = function(dict_popup)
+                if dict_popup then UIManager:close(dict_popup) end
+                UIManager:scheduleIn(0.2, function()
+                    this:onStartTTS()
+                end)
+            end,
+        })
+    end
+end
+
+--- Hook for older and newer KOReader dictionary popup button registration
+function KoreaderTTS:onDictButtonsReady(dict_popup, buttons)
+    if not dict_popup or dict_popup.is_wiki_fullpage then return end
+    local this = self
+    table.insert(buttons, {{
+        id = "koreader_tts_read",
+        text = _("▶ Đọc từ đây (TTS)"),
+        callback = function()
+            UIManager:close(dict_popup)
+            UIManager:scheduleIn(0.2, function()
+                this:onStartTTS()
+            end)
+        end,
+    }})
 end
 
 --- Determine unique identifier for current book (Task 6.2)
@@ -126,10 +171,15 @@ end
 --- Hook registered to KOReader Reader Top Menu
 -- @param menu_items Menu items table
 function KoreaderTTS:addToMainMenu(menu_items)
+    local ok_log, logger = pcall(require, "logger")
+    if ok_log and logger and logger.warn then
+        logger.warn("KoreaderTTS:addToMainMenu() called!")
+    end
     local sub_items = {
         {
             text = _("▶ Bắt đầu đọc từ vị trí này"),
-            callback = function()
+            callback = function(touchmenu_instance)
+                if touchmenu_instance then touchmenu_instance:closeMenu() end
                 self:onStartTTS()
             end,
         },
@@ -144,7 +194,8 @@ function KoreaderTTS:addToMainMenu(menu_items)
     if cur_book_id and last_book_id and cur_book_id == last_book_id and (last_page > 1 or last_chunk > 1) then
         table.insert(sub_items, {
             text = string.format(_("⏯ Đọc tiếp tục phiên trước (Trang %d · Câu %d)"), last_page, last_chunk),
-            callback = function()
+            callback = function(touchmenu_instance)
+                if touchmenu_instance then touchmenu_instance:closeMenu() end
                 self:onResumePreviousSession()
             end,
         })
@@ -152,7 +203,8 @@ function KoreaderTTS:addToMainMenu(menu_items)
 
     table.insert(sub_items, {
         text = _("🎛 Hiện/Ẩn thanh điều khiển"),
-        callback = function()
+        callback = function(touchmenu_instance)
+            if touchmenu_instance then touchmenu_instance:closeMenu() end
             self:onToggleUIPlayer()
         end,
     })
@@ -176,33 +228,87 @@ function KoreaderTTS:addToMainMenu(menu_items)
     })
     table.insert(sub_items, {
         text = _("⏹ Dừng đọc TTS"),
-        callback = function()
+        callback = function(touchmenu_instance)
+            if touchmenu_instance then touchmenu_instance:closeMenu() end
             self:onStopTTS()
         end,
     })
     table.insert(sub_items, {
         text = _("⏲ Hẹn giờ tắt (Sleep Timer)..."),
-        callback = function()
+        callback = function(touchmenu_instance)
+            if touchmenu_instance then touchmenu_instance:closeMenu() end
             self:showSleepTimerDialog()
         end,
     })
     table.insert(sub_items, {
         text = _("🔊 Phát thử 1 câu (Test Audio & API)"),
-        callback = function()
+        callback = function(touchmenu_instance)
+            if touchmenu_instance then touchmenu_instance:closeMenu() end
             self:onTestSingleSentence()
         end,
     })
     table.insert(sub_items, {
         text = _("⚙ Cài đặt máy chủ & Giọng đọc..."),
-        callback = function()
+        callback = function(touchmenu_instance)
+            if touchmenu_instance then touchmenu_instance:closeMenu() end
             self:showSettingsDialog()
         end,
     })
 
     menu_items.koreader_tts = {
         text = _("Đọc bằng giọng nói (TTS)"),
+        sorting_hint = "tools",
         sub_item_table = sub_items,
     }
+end
+
+--- Get current active page number across all KOReader view modes
+function KoreaderTTS:getCurrentPageNumber()
+    if self.ui and type(self.ui.getCurrentPage) == "function" then
+        local ok, p = pcall(self.ui.getCurrentPage, self.ui)
+        if ok and p and p > 0 then return p end
+    end
+    if self.ui and self.ui.paging and self.ui.paging.current_page then
+        return self.ui.paging.current_page
+    end
+    if self.view and self.view.state and self.view.state.page then
+        return self.view.state.page
+    end
+    local doc = self.ui and self.ui.document
+    if doc then
+        if type(doc.getCurrentPage) == "function" then
+            local ok, p = pcall(doc.getCurrentPage, doc)
+            if ok and p then
+                return (p >= 0 and p + 1) or p
+            end
+        end
+        if doc.info and doc.info.current_page then
+            return doc.info.current_page
+        end
+    end
+    return 1
+end
+
+--- Get total page count of active document
+function KoreaderTTS:getTotalPageCount()
+    if self.ui and type(self.ui.getPageCount) == "function" then
+        local ok, count = pcall(self.ui.getPageCount, self.ui)
+        if ok and count and count > 0 then return count end
+    end
+    if self.ui and self.ui.paging and self.ui.paging.total_pages then
+        return self.ui.paging.total_pages
+    end
+    local doc = self.ui and self.ui.document
+    if doc then
+        if type(doc.getPageCount) == "function" then
+            local ok, count = pcall(doc.getPageCount, doc)
+            if ok and count and count > 0 then return count end
+        end
+        if doc.info and doc.info.number_of_pages then
+            return doc.info.number_of_pages
+        end
+    end
+    return 9999
 end
 
 --- Resume previous reading session (Task 6.2)
@@ -211,6 +317,15 @@ function KoreaderTTS:onResumePreviousSession()
     local last_chunk = self.settings:get("last_chunk_index") or 1
 
     local document = self.ui and self.ui.document
+    if not self.chunker then
+        self.chunker = TextChunker:new{
+            min_chars = 30,
+            max_chars = self.settings:get("max_chunk_chars") or 300,
+            filter_footnotes = self.settings:get("filter_footnotes"),
+            custom_mappings = self.settings:getCustomMappings(),
+        }
+    end
+
     if self.playback_queue then
         self.playback_queue.document = document
         self.playback_queue.chunker = self.chunker
@@ -338,13 +453,13 @@ end
 
 --- Test playback of first sentence on page (Task 3.3)
 function KoreaderTTS:onTestSingleSentence()
-    local document = self.ui and self.ui.document
-    local current_page = 1
-    if self.view and self.view.state and self.view.state.page then
-        current_page = self.view.state.page
-    elseif document and type(document.getCurrentPage) == "function" then
-        current_page = document:getCurrentPage() or 1
+    local ok_log, logger = pcall(require, "logger")
+    if ok_log and logger and logger.warn then
+        logger.warn("TTS: onTestSingleSentence() TRIGGERED!")
     end
+
+    local document = self.ui and self.ui.document
+    local current_page = self:getCurrentPageNumber()
 
     local chunker = TextChunker:new{
         min_chars = 30,
@@ -353,18 +468,33 @@ function KoreaderTTS:onTestSingleSentence()
         custom_mappings = self.settings:getCustomMappings(),
     }
 
-    local chunks = chunker:extractPageChunks(document, current_page)
-    if #chunks == 0 then
-        UIManager:show(InfoMessage:new{
-            text = _("Trang hiện tại không có nội dung chữ để đọc."),
-            timeout = 3,
-        })
-        return
+    local test_text = nil
+    local chunks = {}
+    if document then
+        chunks = chunker:extractPageChunks(document, current_page, self.ui)
+        -- If current page has 0 chunks (cover/title/image page), scan forward up to 5 pages
+        if #chunks == 0 then
+            local total_pages = self:getTotalPageCount()
+            for p = current_page + 1, math.min(current_page + 5, total_pages) do
+                local next_chunks = chunker:extractPageChunks(document, p, self.ui)
+                if #next_chunks > 0 then
+                    chunks = next_chunks
+                    current_page = p
+                    break
+                end
+            end
+        end
     end
 
-    local first_chunk = chunks[1]
+    if #chunks > 0 then
+        test_text = chunks[1].text
+    else
+        -- Fallback default test sentence when no book is open or book starts with blank/cover pages
+        test_text = _("Chào mừng bạn đến với KOReader. Đây là câu thử nghiệm kết nối máy chủ và kiểm tra âm thanh TTS.")
+    end
+
     UIManager:show(InfoMessage:new{
-        text = string.format(_("Đang tải âm thanh cho câu 1...\n'%s'"), first_chunk.text),
+        text = string.format(_("Đang tải âm thanh thử nghiệm...\n'%s'"), test_text),
         timeout = 2,
     })
 
@@ -376,7 +506,7 @@ function KoreaderTTS:onTestSingleSentence()
     self.audio_backend:setSpeed(self.settings:get("speed"))
 
     local this = self
-    self.tts_client:fetchSpeechAsync(first_chunk.text, function(success, result_or_err)
+    self.tts_client:fetchSpeechAsync(test_text, function(success, result_or_err)
         if not success then
             UIManager:show(InfoMessage:new{
                 text = string.format(_("Lỗi tải âm thanh từ TTS Server:\n%s"), tostring(result_or_err)),
@@ -386,11 +516,6 @@ function KoreaderTTS:onTestSingleSentence()
         end
 
         local wav_path = result_or_err
-        UIManager:show(InfoMessage:new{
-            text = string.format(_("Đang phát câu 1...\n'%s'"), first_chunk.text),
-            timeout = 2,
-        })
-
         this.audio_backend:play(wav_path, function(finished)
             if finished then
                 UIManager:show(InfoMessage:new{
@@ -399,18 +524,19 @@ function KoreaderTTS:onTestSingleSentence()
                 })
             end
         end)
+
+        local driver = this.audio_backend._active_process or this.audio_backend.driver_name or "timer"
+        UIManager:show(InfoMessage:new{
+            text = string.format(_("Đang phát câu thử nghiệm... [%s]\n'%s'"), tostring(driver), test_text),
+            timeout = 3,
+        })
     end)
 end
 
 --- Start TTS reading session (Task 2.1 & Phase 4 Preload Queue)
 function KoreaderTTS:onStartTTS()
     local document = self.ui and self.ui.document
-    local current_page = 1
-    if self.view and self.view.state and self.view.state.page then
-        current_page = self.view.state.page
-    elseif document and type(document.getCurrentPage) == "function" then
-        current_page = document:getCurrentPage() or 1
-    end
+    local current_page = self:getCurrentPageNumber()
 
     -- Update subsystems with latest settings
     if self.tts_client then
@@ -431,7 +557,34 @@ function KoreaderTTS:onStartTTS()
     }
     self.chunker = chunker
 
-    local chunks = chunker:extractPageChunks(document, current_page)
+    local chunks = chunker:extractPageChunks(document, current_page, self.ui)
+
+    -- If current page is empty (e.g. cover/title/illustration page), scan ahead up to 10 pages
+    if #chunks == 0 and document then
+        local total_pages = self:getTotalPageCount()
+        for p = current_page + 1, math.min(current_page + 10, total_pages) do
+            local next_chunks = chunker:extractPageChunks(document, p, self.ui)
+            if #next_chunks > 0 then
+                chunks = next_chunks
+                current_page = p
+                -- Turn reader page to match
+                if self.ui then
+                    pcall(function()
+                        local ok_ev, Event = pcall(require, "ui/event")
+                        if self.ui.paging and type(self.ui.paging.onGotoPage) == "function" then
+                            self.ui.paging:onGotoPage(current_page)
+                        elseif type(self.ui.gotoPage) == "function" then
+                            self.ui:gotoPage(current_page)
+                        elseif ok_ev and Event then
+                            self.ui:handleEvent(Event:new("GotoPage", current_page))
+                        end
+                    end)
+                end
+                break
+            end
+        end
+    end
+
     local chunk_count = #chunks
 
     -- Log extracted chunks for debugging (DoD 2.1)
@@ -458,7 +611,7 @@ function KoreaderTTS:onStartTTS()
         self.playback_queue.chunker = chunker
         if self.ui_player then
             self.ui_player.view = self.view or (self.ui and self.ui.view)
-            self.ui_player:show()
+            pcall(function() self.ui_player:show() end)
         end
         self.playback_queue:start(current_page, 1)
     end
@@ -929,6 +1082,23 @@ function KoreaderTTS:showSettingsDialog()
         buttons = buttons,
     }
     UIManager:show(self.settings_dialog)
+end
+
+--- Handle reader close / document close: ensure TTS stops cleanly
+function KoreaderTTS:onCloseDocument()
+    self:onStopTTS()
+end
+
+--- Handle device suspend / screen turn-off: pause playback cleanly
+function KoreaderTTS:onSuspend()
+    if self.playback_queue and self.playback_queue:getState() == "PLAYING" then
+        self.playback_queue:pause()
+    end
+end
+
+--- Handle KOReader exit: stop all playback
+function KoreaderTTS:onExit()
+    self:onStopTTS()
 end
 
 return KoreaderTTS

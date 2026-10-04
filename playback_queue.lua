@@ -136,7 +136,7 @@ function PlaybackQueue:_getPageChunks(page_num)
         return {}
     end
 
-    local chunks = self.chunker:extractPageChunks(self.document, page_num) or {}
+    local chunks = self.chunker:extractPageChunks(self.document, page_num, self.ui) or {}
     self._page_cache[page_num] = chunks
 
     -- Prune cache if holding more than 5 pages to conserve RAM
@@ -454,7 +454,7 @@ function PlaybackQueue:_advanceWindow()
     self.current_index = self.slots[0].chunk_index
 
     -- Auto turn page when advancing to a new page
-    if new_page > old_page then
+    if new_page ~= old_page then
         self:_turnPage(new_page)
     end
 
@@ -483,14 +483,21 @@ end
 
 --- Auto-turn page in KOReader
 function PlaybackQueue:_turnPage(new_page)
-    if self.ui then
+    if self.ui and new_page then
         pcall(function()
-            if type(self.ui.onNextPage) == "function" then
-                self.ui:onNextPage()
+            local ok_ev, Event = pcall(require, "ui/event")
+            if self.ui.paging and type(self.ui.paging.onGotoPage) == "function" then
+                self.ui.paging:onGotoPage(new_page)
             elseif type(self.ui.gotoPage) == "function" then
                 self.ui:gotoPage(new_page)
-            elseif type(self.ui.handleEvent) == "function" then
-                self.ui:handleEvent({ name = "GotoPage", page = new_page })
+            elseif ok_ev and Event then
+                self.ui:handleEvent(Event:new("GotoPage", new_page))
+            elseif type(self.ui.onGotoPage) == "function" then
+                self.ui:onGotoPage(new_page)
+            elseif self.ui.rolling and ok_ev and Event then
+                self.ui:handleEvent(Event:new("GotoViewRel", 1))
+            elseif type(self.ui.onNextPage) == "function" then
+                self.ui:onNextPage()
             end
         end)
     end
@@ -514,15 +521,30 @@ function PlaybackQueue:pause()
         if self.audio_backend then
             self.audio_backend:pause()
         end
+        pcall(function()
+            local ok_d, Device = pcall(require, "device")
+            if not ok_d or not Device then Device = _G.Device end
+            if Device and type(Device.preventStandby) == "function" then
+                Device:preventStandby(false)
+            end
+        end)
     end
 end
 
 --- Resume audio playback
 function PlaybackQueue:resume()
     if self.state == PlaybackQueue.STATE_PAUSED then
-        if self.audio_backend and self.audio_backend:isPlaying() then
-            self.audio_backend:resume()
+        pcall(function()
+            local ok_d, Device = pcall(require, "device")
+            if not ok_d or not Device then Device = _G.Device end
+            if Device and type(Device.preventStandby) == "function" then
+                Device:preventStandby(true)
+            end
+        end)
+
+        if self.audio_backend and self.audio_backend.isPaused and self.audio_backend:isPaused() then
             self:_setState(PlaybackQueue.STATE_PLAYING)
+            self.audio_backend:resume()
         else
             self:_playSlot(0)
         end
@@ -587,6 +609,8 @@ end
 
 --- Seek directly to specified sentence (Smart Seeking & Queue Invalidation)
 function PlaybackQueue:seekChunk(page_num, chunk_index)
+    local old_page = self.current_page
+
     -- 1. Increment queue generation token to invalidate prior tasks
     self.queue_generation = self.queue_generation + 1
     local gen = self.queue_generation
@@ -603,6 +627,11 @@ function PlaybackQueue:seekChunk(page_num, chunk_index)
     self.current_page = page_num
     self.current_index = chunk_index
     self.slots = { [0] = nil, [1] = nil, [2] = nil }
+
+    -- Turn page on ReaderUI if page changed
+    if old_page and old_page ~= page_num then
+        self:_turnPage(page_num)
+    end
 
     -- 5. Rebuild 3-slot window
     self:_ensureWindow()

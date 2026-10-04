@@ -26,6 +26,34 @@ if not ok_uimanager or not UIManager then
     }
 end
 
+local ok_ffi, ffi = pcall(require, "ffi")
+if ok_ffi and ffi then
+    pcall(function()
+        ffi.cdef[[
+            typedef uint16_t SDL_AudioFormat;
+            typedef struct SDL_AudioSpec {
+                int freq;
+                SDL_AudioFormat format;
+                uint8_t channels;
+                uint8_t silence;
+                uint16_t samples;
+                uint16_t padding;
+                uint32_t size;
+                void (*callback)(void *userdata, uint8_t *stream, int len);
+                void *userdata;
+            } SDL_AudioSpec;
+
+            int SDL_InitSubSystem(uint32_t flags);
+            uint32_t SDL_OpenAudioDevice(const char *device, int iscapture, const SDL_AudioSpec *desired, SDL_AudioSpec *obtained, int allowed_changes);
+            int SDL_QueueAudio(uint32_t dev, const void *data, uint32_t len);
+            void SDL_PauseAudioDevice(uint32_t dev, int pause_on);
+            void SDL_ClearQueuedAudio(uint32_t dev);
+            void SDL_CloseAudioDevice(uint32_t dev);
+            const char *SDL_GetError(void);
+        ]]
+    end)
+end
+
 local AudioBackend = {}
 AudioBackend.__index = AudioBackend
 
@@ -116,8 +144,19 @@ function AudioBackend:new(options)
     instance._current_token = 0
     instance._active_timer = nil
     instance._active_process = nil
+    instance._sdl_device = nil
+    instance._android_player = nil
 
     instance:_detectDriver()
+
+    if instance.driver_name == "android" then
+        local ok_ap, AP = pcall(require, "android_player")
+        if ok_ap and AP then
+            instance._android_player = AP:new()
+            pcall(function() instance._android_player:init() end)
+        end
+    end
+
     return instance
 end
 
@@ -142,6 +181,9 @@ end
 function AudioBackend:setSpeed(speed)
     if type(speed) == "number" then
         self.speed = math.max(0.5, math.min(2.0, speed))
+        if self._android_player then
+            pcall(function() self._android_player:setSpeed(self.speed) end)
+        end
     end
 end
 
@@ -151,12 +193,21 @@ function AudioBackend:isPlaying()
     return self._is_playing and not self._is_paused
 end
 
+--- Check if audio is currently paused
+-- @return boolean
+function AudioBackend:isPaused()
+    return self._is_playing and self._is_paused
+end
+
 --- Stop audio playback immediately
 function AudioBackend:stop()
     -- Increment token to invalidate any pending playback callbacks
     self._current_token = self._current_token + 1
     self._is_playing = false
     self._is_paused = false
+    self._play_end_time = nil
+    self._remaining_play_time = nil
+    self._on_finished_cb = nil
 
     -- Cancel timer if scheduled
     if self._active_timer and UIManager.unschedule then
@@ -164,23 +215,60 @@ function AudioBackend:stop()
     end
     self._active_timer = nil
 
-    -- Terminate external player process if running
-    if self._active_process then
+    -- Stop Android MediaPlayer if active
+    if self._android_player then
+        pcall(function() self._android_player:stop() end)
+    end
+
+    -- Stop in-process SDL2 audio if active
+    if self._sdl_device and self._sdl_device > 0 then
+        pcall(function()
+            if ok_ffi and ffi and ffi.C.SDL_ClearQueuedAudio and ffi.C.SDL_CloseAudioDevice then
+                ffi.C.SDL_ClearQueuedAudio(self._sdl_device)
+                ffi.C.SDL_CloseAudioDevice(self._sdl_device)
+            end
+        end)
+        self._sdl_device = nil
+    end
+
+    -- Terminate external player process if running (non-Android desktop/Linux only)
+    if self._active_process and self.driver_name ~= "android" then
         pcall(function()
             if os and os.execute then
                 if package.config:sub(1, 1) ~= "\\" then
-                    pcall(os.execute, "killall -9 mpv aplay 2>/dev/null")
+                    pcall(os.execute, "killall -9 tinyplay mpv aplay stagefright 2>/dev/null")
                 end
             end
         end)
-        self._active_process = nil
     end
+    self._active_process = nil
 end
 
 --- Pause audio playback
 function AudioBackend:pause()
-    if self._is_playing then
+    if self._is_playing and not self._is_paused then
         self._is_paused = true
+
+        -- Record remaining play time and cancel completion timer while paused
+        local now = (UIManager.getTime and UIManager:getTime()) or os.time()
+        if self._play_end_time then
+            self._remaining_play_time = math.max(0.1, self._play_end_time - now)
+        end
+        if self._active_timer and UIManager.unschedule then
+            UIManager:unschedule(self._active_timer)
+            self._active_timer = nil
+        end
+
+        if self._android_player then
+            pcall(function() self._android_player:pause() end)
+        end
+        if self._sdl_device and self._sdl_device > 0 then
+            pcall(function()
+                if ok_ffi and ffi and ffi.C.SDL_PauseAudioDevice then
+                    ffi.C.SDL_PauseAudioDevice(self._sdl_device, 1)
+                end
+            end)
+        end
     end
 end
 
@@ -188,6 +276,33 @@ end
 function AudioBackend:resume()
     if self._is_playing and self._is_paused then
         self._is_paused = false
+        if self._android_player then
+            pcall(function() self._android_player:resume() end)
+        end
+        if self._sdl_device and self._sdl_device > 0 then
+            pcall(function()
+                if ok_ffi and ffi and ffi.C.SDL_PauseAudioDevice then
+                    ffi.C.SDL_PauseAudioDevice(self._sdl_device, 0)
+                end
+            end)
+        end
+
+        -- Resume completion timer for remaining duration
+        local remaining = self._remaining_play_time or 1.0
+        local now = (UIManager.getTime and UIManager:getTime()) or os.time()
+        self._play_end_time = now + remaining
+        local session_token = self._current_token
+        local on_finished = self._on_finished_cb
+        local this = self
+        self._active_timer = UIManager:scheduleIn(remaining, function()
+            if this._current_token == session_token and this._is_playing and not this._is_paused then
+                this._is_playing = false
+                this._active_timer = nil
+                if on_finished then
+                    pcall(on_finished, true)
+                end
+            end
+        end)
     end
 end
 
@@ -220,6 +335,11 @@ function AudioBackend:play(file_path, on_finished, opts)
     end
     local actual_play_time = math.max(0.2, duration / speed)
 
+    local now = (UIManager.getTime and UIManager:getTime()) or os.time()
+    self._play_end_time = now + actual_play_time
+    self._remaining_play_time = actual_play_time
+    self._on_finished_cb = on_finished
+
     -- Dispatch to platform driver
     local driver_dispatched = false
     if self.driver_name == "linux" then
@@ -229,12 +349,13 @@ function AudioBackend:play(file_path, on_finished, opts)
     end
 
     -- Schedule completion timer (used for Desktop/Test and driver fallback)
+    local this = self
     self._active_timer = UIManager:scheduleIn(actual_play_time, function()
-        -- Ensure session token is still valid and was not cancelled by stop()
-        if self._current_token == session_token and self._is_playing then
-            self._is_playing = false
-            self._is_paused = false
-            self._active_timer = nil
+        -- Ensure session token is still valid and was not cancelled by stop() or paused
+        if this._current_token == session_token and this._is_playing and not this._is_paused then
+            this._is_playing = false
+            this._is_paused = false
+            this._active_timer = nil
             if on_finished then
                 pcall(on_finished, true)
             end
@@ -267,16 +388,103 @@ function AudioBackend:_playLinux(file_path, speed)
     return ok
 end
 
---- Play audio on Android (via JNI MediaPlayer or intent)
-function AudioBackend:_playAndroid(file_path, speed)
+--- Play PCM audio via native in-process SDL2 Audio subsystem
+function AudioBackend:_playSDL2(file_path)
+    if not ok_ffi or not ffi then return false, "FFI not available" end
+
     local ok, res = pcall(function()
-        local ok_android, android = pcall(require, "android")
-        if ok_android and android and android.playAudio then
-            return android.playAudio(file_path, speed)
+        if not ffi.C.SDL_InitSubSystem or not ffi.C.SDL_OpenAudioDevice or not ffi.C.SDL_QueueAudio then
+            return false, "SDL2 symbols not found"
         end
-        return false
+
+        -- Initialize SDL_INIT_AUDIO (0x00000010)
+        local init_ok = pcall(function()
+            return ffi.C.SDL_InitSubSystem(0x00000010)
+        end)
+        if not init_ok then return false, "SDL_InitSubSystem failed" end
+
+        local f = io.open(file_path, "rb")
+        if not f then return false, "Cannot open WAV file" end
+        local header = f:read(44)
+        if not header or #header < 44 or header:sub(1, 4) ~= "RIFF" then
+            f:close()
+            return false, "Invalid WAV header"
+        end
+
+        local channels = read_uint16_le(header, 23)
+        channels = (channels and channels > 0) and channels or 1
+        local sample_rate = read_uint32_le(header, 25)
+        sample_rate = (sample_rate and sample_rate > 0) and sample_rate or 24000
+        local bits = read_uint16_le(header, 35)
+        bits = (bits and bits > 0) and bits or 16
+
+        local pcm_data = f:read("*a")
+        f:close()
+        if not pcm_data or #pcm_data == 0 then return false, "Empty PCM data" end
+
+        -- Close any previous active SDL device
+        if self._sdl_device and self._sdl_device > 0 then
+            pcall(ffi.C.SDL_ClearQueuedAudio, self._sdl_device)
+            pcall(ffi.C.SDL_CloseAudioDevice, self._sdl_device)
+            self._sdl_device = nil
+        end
+
+        local spec = ffi.new("SDL_AudioSpec")
+        spec.freq = sample_rate
+        spec.format = (bits == 8) and 0x0008 or 0x8010 -- AUDIO_U8 or AUDIO_S16LSB
+        spec.channels = channels
+        spec.samples = 1024
+        spec.callback = nil
+        spec.userdata = nil
+
+        local dev = ffi.C.SDL_OpenAudioDevice(nil, 0, spec, nil, 0)
+        if dev == 0 then
+            local err_msg = "SDL_OpenAudioDevice returned 0"
+            if ffi.C.SDL_GetError then
+                pcall(function() err_msg = ffi.string(ffi.C.SDL_GetError()) end)
+            end
+            return false, err_msg
+        end
+
+        self._sdl_device = dev
+        ffi.C.SDL_QueueAudio(dev, pcm_data, #pcm_data)
+        ffi.C.SDL_PauseAudioDevice(dev, 0) -- 0 = play (unpause)
+        return true
     end)
+
     return ok and res
+end
+
+--- Play audio on Android (via android_player MediaPlayer JNI, SDL2, or Linux fallback)
+function AudioBackend:_playAndroid(file_path, speed)
+    -- Priority 1: Official Android MediaPlayer via android_player (audiobook.koplugin reference)
+    if self._android_player and self._android_player._initialized then
+        self._android_player:setSpeed(speed)
+        local ok = self._android_player:play(file_path, 0)
+        if ok then
+            self._active_process = "MediaPlayer"
+            return true
+        end
+    end
+
+    -- Priority 2: SDL2 in-process native audio
+    local ok_sdl, res_sdl = self:_playSDL2(file_path)
+    if ok_sdl and res_sdl then
+        self._active_process = "SDL2"
+        return true
+    end
+
+    -- Priority 3: Device:playSound
+    if Device and type(Device.playSound) == "function" then
+        local ok_snd, res_snd = pcall(Device.playSound, Device, file_path)
+        if ok_snd and res_snd ~= false then
+            self._active_process = "Device:playSound"
+            return true
+        end
+    end
+
+    -- Priority 4: Linux ALSA / mpv fallback
+    return self:_playLinux(file_path, speed)
 end
 
 return AudioBackend
