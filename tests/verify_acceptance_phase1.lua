@@ -92,6 +92,15 @@ local edit_url_button = settings_dialog.buttons[1][1]
 print(string.format("  -> User tapped button: '%s'", edit_url_button.text))
 MockKOReader.UIManager:reset()
 edit_url_button.callback()
+MockKOReader.UIManager:runAllScheduled()
+
+-- If button 1 opened the consolidated Server & Voice dialog, click its server url button
+if #MockKOReader.UIManager._shown_widgets >= 1 and MockKOReader.UIManager._shown_widgets[1].title:find("Máy chủ") then
+    local sv_dialog = MockKOReader.UIManager._shown_widgets[1]
+    MockKOReader.UIManager:reset()
+    sv_dialog.buttons[1][1].callback()
+    MockKOReader.UIManager:runAllScheduled()
+end
 
 -- Virtual keyboard opens with InputDialog
 assert(#MockKOReader.UIManager._shown_widgets == 1, "ERROR: InputDialog for Server URL not opened!")

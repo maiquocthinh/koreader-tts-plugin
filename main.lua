@@ -205,10 +205,14 @@ function KoreaderTTS:addToMainMenu(menu_items)
     table.insert(sub_items, {
         text = _("⏲ Hẹn giờ tắt (Sleep Timer)..."),
         callback = function(touchmenu_instance)
-            if touchmenu_instance then touchmenu_instance:closeMenu() end
-            UIManager:scheduleIn(0.1, function()
+            if touchmenu_instance then
+                touchmenu_instance:closeMenu()
+                UIManager:scheduleIn(0.1, function()
+                    this:showSleepTimerDialog()
+                end)
+            else
                 this:showSleepTimerDialog()
-            end)
+            end
         end,
     })
     table.insert(sub_items, {
@@ -216,9 +220,14 @@ function KoreaderTTS:addToMainMenu(menu_items)
         callback = function(touchmenu_instance)
             local ok_l, log = pcall(require, "logger")
             if ok_l and log then log.warn("TTS: Cài đặt plugin callback invoked!") end
-            UIManager:scheduleIn(0.1, function()
+            if touchmenu_instance then
+                touchmenu_instance:closeMenu()
+                UIManager:scheduleIn(0.1, function()
+                    this:showSettingsDialog()
+                end)
+            else
                 this:showSettingsDialog()
-            end)
+            end
         end,
     })
 

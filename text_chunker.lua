@@ -385,6 +385,10 @@ function TextChunker:extractRawPageText(document, page_num, ui)
         if ok and res then
             local t, b = extractTextAndBoxes(res)
             if t and #t > 0 then
+                if (not b or #b == 0) and type(document.getWordBBoxes) == "function" then
+                    local ok_wb, wbs = pcall(document.getWordBBoxes, document, page_num)
+                    if ok_wb and wbs then b = wbs end
+                end
                 return t, b or {}
             end
         end
