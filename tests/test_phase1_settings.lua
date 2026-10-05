@@ -88,11 +88,11 @@ run_test("Bounds clamping & trailing slash removal", function()
     s:set("speed", 5.0)
     assert(s:get("speed") == 2.0, "speed > 2.0 must clamp to 2.0")
 
-    -- Preload count clamping [1, 3]
+    -- Preload count clamping [1, 7]
     s:set("preload_count", 0)
     assert(s:get("preload_count") == 1, "preload_count < 1 must clamp to 1")
     s:set("preload_count", 10)
-    assert(s:get("preload_count") == 3, "preload_count > 3 must clamp to 3")
+    assert(s:get("preload_count") == 7, "preload_count > 7 must clamp to 7")
 
     -- Timeout clamping [2, 60]
     s:set("request_timeout", 1)

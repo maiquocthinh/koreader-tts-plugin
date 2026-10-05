@@ -43,17 +43,11 @@ if not ok_btn then Button = WidgetContainer end
 local ok_bd, ButtonDialog = pcall(require, "ui/widget/buttondialog")
 if not ok_bd or not ButtonDialog then ButtonDialog = WidgetContainer end
 
-local ok_icon, IconButton = pcall(require, "ui/widget/iconbutton")
-if not ok_icon then IconButton = WidgetContainer end
-
 local ok_text, TextWidget = pcall(require, "ui/widget/textwidget")
 if not ok_text then TextWidget = WidgetContainer end
 
 local ok_bc, BottomContainer = pcall(require, "ui/widget/container/bottomcontainer")
 if not ok_bc or not BottomContainer then BottomContainer = WidgetContainer end
-
-local ok_cc, CenterContainer = pcall(require, "ui/widget/container/centercontainer")
-if not ok_cc or not CenterContainer then CenterContainer = WidgetContainer end
 
 local ok_hspan, HorizontalSpan = pcall(require, "ui/widget/horizontalspan")
 if not ok_hspan or not HorizontalSpan then
@@ -266,16 +260,26 @@ function UIPlayer:showControlBar()
     }
     self.btn_close = btn_close
 
+    local actions_group = HorizontalGroup:new{
+        align = "center",
+        btn_minimize,
+        HorizontalSpan:new{ width = 6 },
+        btn_close,
+    }
+    self.header_actions = actions_group
+
+    self.header_span1 = HorizontalSpan:new{ width = 28 }
+    self.header_span2 = HorizontalSpan:new{ width = 28 }
+
     local header_row = HorizontalGroup:new{
         align = "center",
         self.title_widget,
-        HorizontalSpan:new{ width = 20 },
+        self.header_span1,
         self.buffer_status_widget,
-        HorizontalSpan:new{ width = 24 },
-        btn_minimize,
-        HorizontalSpan:new{ width = 4 },
-        btn_close,
+        self.header_span2,
+        actions_group,
     }
+    self.header_row = header_row
 
     -- 2. Row 2: Navigation controls & Quick settings
     local btn_prev_page = Button:new{
@@ -363,6 +367,7 @@ function UIPlayer:showControlBar()
         HorizontalSpan:new{ width = 8 },
         self.sleep_timer_btn,
     }
+    self.controls_row = controls_row
 
     local content_group = VerticalGroup:new{
         align = "center",
@@ -372,6 +377,10 @@ function UIPlayer:showControlBar()
         controls_row,
         VerticalSpan:new{ width = 4 },
     }
+    self.content_group = content_group
+
+    -- Compute space-between gap for header row before rendering
+    self:_layoutHeaderSpaceBetween()
 
     local card = FrameContainer:new{
         margin = 0,
@@ -456,6 +465,31 @@ function UIPlayer:_isTapOnWidget(pos, widget)
         and pos.y >= (d.y - pad) and pos.y <= (d.y + d.h + pad)
 end
 
+--- Recalculate header row layout like CSS 'justify-content: space-between'
+function UIPlayer:_layoutHeaderSpaceBetween()
+    if not self.controls_row or not self.header_row or not self.header_span1 or not self.header_span2 then
+        return
+    end
+
+    local total_w = (self.controls_row.getSize and self.controls_row:getSize().w) or 460
+    local w_title = (self.title_widget and self.title_widget.getSize and self.title_widget:getSize().w) or 160
+    local w_buffer = (self.buffer_status_widget and self.buffer_status_widget.getSize and self.buffer_status_widget:getSize().w) or 120
+    local w_actions = (self.header_actions and self.header_actions.getSize and self.header_actions:getSize().w) or 60
+
+    local free_space = total_w - (w_title + w_buffer + w_actions)
+    local gap = math.max(16, math.floor(free_space / 2))
+
+    self.header_span1.width = gap
+    self.header_span2.width = gap
+
+    if self.header_row.resetLayout then
+        self.header_row:resetLayout()
+    end
+    if self.content_group and self.content_group.resetLayout then
+        self.content_group:resetLayout()
+    end
+end
+
 --- Hide Floating Control Bar
 function UIPlayer:hideControlBar()
     if self.control_bar then
@@ -473,6 +507,12 @@ function UIPlayer:hideControlBar()
         self.btn_next_chunk = nil
         self.btn_next_page = nil
         self.card_container = nil
+        self.header_row = nil
+        self.header_span1 = nil
+        self.header_span2 = nil
+        self.header_actions = nil
+        self.controls_row = nil
+        self.content_group = nil
     end
 end
 
@@ -682,22 +722,24 @@ function UIPlayer:_updateBufferStatus()
         return
     end
 
-    local s1 = self.playback_queue:getSlot(1)
-    local s2 = self.playback_queue:getSlot(2)
+    local k = (self.settings and self.settings:get("preload_count")) or 2
+    k = math.max(1, math.min(7, k))
 
-    local s1_ready = s1 and (s1.status == "READY")
-    local s2_ready = s2 and (s2.status == "READY")
-
-    local status_text = _("Đệm: ○○ (đang tải)")
-    if s1_ready and s2_ready then
-        status_text = _("Đệm: ●● (2 câu)")
-    elseif s1_ready then
-        status_text = _("Đệm: ●○ (1 câu)")
+    local ready_count = 0
+    for i = 1, k do
+        local s = self.playback_queue:getSlot(i)
+        if s and s.status == "READY" then
+            ready_count = ready_count + 1
+        end
     end
+
+    local dots = string.rep("●", ready_count) .. string.rep("○", k - ready_count)
+    local status_text = string.format(_("Đệm: %s (%d câu)"), dots, ready_count)
 
     if self.buffer_status_widget.setText then
         self.buffer_status_widget:setText(status_text)
     end
+    self:_layoutHeaderSpaceBetween()
 end
 
 --- Event callback when current chunk changes
@@ -711,6 +753,7 @@ function UIPlayer:onChunkChange(chunk, page, index, total)
     if self.title_widget and self.title_widget.setText then
         self.title_widget:setText(progress_str)
     end
+    self:_layoutHeaderSpaceBetween()
 
     local cur_speed = self.audio_backend and self.audio_backend.speed or 1.0
     if self.mini_label_btn and self.mini_label_btn.setText then
@@ -820,48 +863,46 @@ function UIPlayer:showSpeedDialog()
         if this.mini_label_btn and this.mini_label_btn.setText then
             this.mini_label_btn:setText(string.format("%d/%d · %.1fx", this.current_index, this.total_on_page, spd))
         end
+        if dialog then
+            UIManager:close(dialog)
+        end
         if this.control_bar and UIManager and UIManager.setDirty then
             pcall(UIManager.setDirty, UIManager, this.control_bar, "ui")
         end
-        if dialog then
-            UIManager:close(dialog)
+        -- Cleanly repaint uncovered screen area to avoid ghosting artifacts
+        if UIManager and UIManager.setDirty then
+            pcall(UIManager.setDirty, UIManager, nil, "ui")
         end
     end
 
     local buttons = {
         {
             {
-                text = "0.75x",
-                checked_func = function() return math.abs(cur_speed - 0.75) < 0.05 end,
+                text = (math.abs(cur_speed - 0.75) < 0.05 and "✓ " or "") .. "0.75x",
                 callback = function() selectSpeed(0.75) end,
             },
             {
-                text = _("1.0x (Mặc định)"),
-                checked_func = function() return math.abs(cur_speed - 1.0) < 0.05 end,
+                text = (math.abs(cur_speed - 1.0) < 0.05 and "✓ " or "") .. _("1.0x (Mặc định)"),
                 callback = function() selectSpeed(1.0) end,
             },
         },
         {
             {
-                text = "1.25x",
-                checked_func = function() return math.abs(cur_speed - 1.25) < 0.05 end,
+                text = (math.abs(cur_speed - 1.25) < 0.05 and "✓ " or "") .. "1.25x",
                 callback = function() selectSpeed(1.25) end,
             },
             {
-                text = "1.5x",
-                checked_func = function() return math.abs(cur_speed - 1.5) < 0.05 end,
+                text = (math.abs(cur_speed - 1.5) < 0.05 and "✓ " or "") .. "1.5x",
                 callback = function() selectSpeed(1.5) end,
             },
         },
         {
             {
-                text = "1.75x",
-                checked_func = function() return math.abs(cur_speed - 1.75) < 0.05 end,
+                text = (math.abs(cur_speed - 1.75) < 0.05 and "✓ " or "") .. "1.75x",
                 callback = function() selectSpeed(1.75) end,
             },
             {
-                text = "2.0x",
-                checked_func = function() return math.abs(cur_speed - 2.0) < 0.05 end,
+                text = (math.abs(cur_speed - 2.0) < 0.05 and "✓ " or "") .. "2.0x",
                 callback = function() selectSpeed(2.0) end,
             },
         },
@@ -869,7 +910,12 @@ function UIPlayer:showSpeedDialog()
             {
                 text = _("Đóng"),
                 callback = function()
-                    if dialog then UIManager:close(dialog) end
+                    if dialog then
+                        UIManager:close(dialog)
+                        if UIManager.setDirty then
+                            pcall(UIManager.setDirty, UIManager, nil, "ui")
+                        end
+                    end
                 end,
             },
         },
@@ -921,48 +967,46 @@ function UIPlayer:showSleepTimerDialog()
         if this.sleep_timer_btn and this.sleep_timer_btn.setText then
             this.sleep_timer_btn:setText(this.sleep_timer:getDisplayText())
         end
+        if dialog then
+            UIManager:close(dialog)
+        end
         if this.control_bar and UIManager and UIManager.setDirty then
             pcall(UIManager.setDirty, UIManager, this.control_bar, "ui")
         end
-        if dialog then
-            UIManager:close(dialog)
+        -- Cleanly repaint uncovered screen area to avoid ghosting artifacts
+        if UIManager and UIManager.setDirty then
+            pcall(UIManager.setDirty, UIManager, nil, "ui")
         end
     end
 
     local buttons = {
         {
             {
-                text = _("Tắt hẹn giờ"),
-                checked_func = function() return cur_mode == "0" end,
+                text = (cur_mode == "0" and "✓ " or "") .. _("Tắt hẹn giờ"),
                 callback = function() selectTimer("0") end,
             },
             {
-                text = _("15 phút"),
-                checked_func = function() return cur_mode == "15" end,
+                text = (cur_mode == "15" and "✓ " or "") .. _("15 phút"),
                 callback = function() selectTimer("15") end,
             },
         },
         {
             {
-                text = _("30 phút"),
-                checked_func = function() return cur_mode == "30" end,
+                text = (cur_mode == "30" and "✓ " or "") .. _("30 phút"),
                 callback = function() selectTimer("30") end,
             },
             {
-                text = _("45 phút"),
-                checked_func = function() return cur_mode == "45" end,
+                text = (cur_mode == "45" and "✓ " or "") .. _("45 phút"),
                 callback = function() selectTimer("45") end,
             },
         },
         {
             {
-                text = _("60 phút"),
-                checked_func = function() return cur_mode == "60" end,
+                text = (cur_mode == "60" and "✓ " or "") .. _("60 phút"),
                 callback = function() selectTimer("60") end,
             },
             {
-                text = _("Hết trang hiện tại"),
-                checked_func = function() return cur_mode == "page" end,
+                text = (cur_mode == "page" and "✓ " or "") .. _("Hết trang hiện tại"),
                 callback = function() selectTimer("page") end,
             },
         },
@@ -970,7 +1014,12 @@ function UIPlayer:showSleepTimerDialog()
             {
                 text = _("Đóng"),
                 callback = function()
-                    if dialog then UIManager:close(dialog) end
+                    if dialog then
+                        UIManager:close(dialog)
+                        if UIManager.setDirty then
+                            pcall(UIManager.setDirty, UIManager, nil, "ui")
+                        end
+                    end
                 end,
             },
         },

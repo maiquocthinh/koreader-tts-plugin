@@ -97,6 +97,10 @@ function UIManager:scheduleIn(delay, func)
     return task
 end
 
+function UIManager:nextTick(func, ...)
+    return self:scheduleIn(0, func, ...)
+end
+
 function UIManager:unschedule(task)
     if task then
         task.cancelled = true

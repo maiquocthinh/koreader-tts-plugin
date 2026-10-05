@@ -23,7 +23,7 @@ local DEFAULT_SETTINGS = {
     -- 3. Chunking & Buffer
     chunk_mode          = "sentence",                  -- "sentence"
     max_chunk_chars     = 300,                         -- Maximum characters per chunk
-    preload_count       = 2,                           -- Number of chunks to preload (1 - 3)
+    preload_count       = 2,                           -- Number of chunks to preload (1 - 7)
     preload_cross_page  = true,                        -- Preload across pages
 
     -- 4. E-ink Experience
@@ -135,7 +135,7 @@ function Settings:set(key, value)
     if key == "speed" then
         value = math.max(0.5, math.min(2.0, value))
     elseif key == "preload_count" then
-        value = math.max(1, math.min(3, math.floor(value)))
+        value = math.max(1, math.min(7, math.floor(value)))
     elseif key == "request_timeout" then
         value = math.max(2, math.min(60, value))
     elseif key == "max_chunk_chars" then

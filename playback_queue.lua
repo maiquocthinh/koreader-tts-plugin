@@ -202,7 +202,7 @@ end
 
 --- Cancel all active fetch tasks in slots
 function PlaybackQueue:_cancelActiveFetches()
-    for i = 0, 2 do
+    for i = 0, 7 do
         local slot = self.slots[i]
         if slot and slot.cancel_fn then
             pcall(slot.cancel_fn)
@@ -263,9 +263,9 @@ function PlaybackQueue:_fetchSlot(offset)
             return
         end
 
-        -- Verify where this slot currently resides in the window (handles promotion from 1/2 to 0)
+        -- Verify where this slot currently resides in the window (handles promotion from tail to 0)
         local slot_current_offset = nil
-        for i = 0, 2 do
+        for i = 0, 7 do
             if this.slots[i] == slot then
                 slot_current_offset = i
                 break
@@ -324,49 +324,47 @@ function PlaybackQueue:_fetchSlot(offset)
     end)
 end
 
---- Ensure all 3 slots (N, N+1, N+2) are populated and preloading
+--- Ensure all slots (Slot 0 + up to K preload slots) are populated and preloading
 function PlaybackQueue:_ensureWindow()
     local gen = self.queue_generation
+    local k = (self.settings and self.settings:get("preload_count")) or 2
+    k = math.max(1, math.min(7, k))
 
     -- Slot 0: N
     if not self.slots[0] then
         self.slots[0] = self:_createSlotItem(self.current_page, self.current_index, gen)
     end
 
-    -- Slot 1: N+1
-    local p1, i1 = self:_getNextPosition(self.current_page, self.current_index)
-    if p1 and i1 then
-        if not self.slots[1] or self.slots[1].page ~= p1 or self.slots[1].chunk_index ~= i1 then
-            if self.slots[1] and self.slots[1].cancel_fn then pcall(self.slots[1].cancel_fn) end
-            self.slots[1] = self:_createSlotItem(p1, i1, gen)
+    -- Slots 1 .. k
+    local cur_p = self.current_page
+    local cur_i = self.current_index
+    for offset = 1, k do
+        local next_p, next_i = self:_getNextPosition(cur_p, cur_i)
+        if next_p and next_i then
+            if not self.slots[offset] or self.slots[offset].page ~= next_p or self.slots[offset].chunk_index ~= next_i then
+                if self.slots[offset] and self.slots[offset].cancel_fn then pcall(self.slots[offset].cancel_fn) end
+                self.slots[offset] = self:_createSlotItem(next_p, next_i, gen)
+            end
+            cur_p = next_p
+            cur_i = next_i
+        else
+            self.slots[offset] = nil
         end
-    else
-        self.slots[1] = nil
     end
 
-    -- Slot 2: N+2
-    local p2, i2 = nil, nil
-    if p1 and i1 then
-        p2, i2 = self:_getNextPosition(p1, i1)
-    end
-    if p2 and i2 then
-        if not self.slots[2] or self.slots[2].page ~= p2 or self.slots[2].chunk_index ~= i2 then
-            if self.slots[2] and self.slots[2].cancel_fn then pcall(self.slots[2].cancel_fn) end
-            self.slots[2] = self:_createSlotItem(p2, i2, gen)
+    -- Clean up any extra slots beyond k
+    for offset = k + 1, 7 do
+        if self.slots[offset] then
+            if self.slots[offset].cancel_fn then pcall(self.slots[offset].cancel_fn) end
+            self.slots[offset] = nil
         end
-    else
-        self.slots[2] = nil
     end
 
     -- Trigger fetches for unready slots
-    if self.slots[0] and self.slots[0].status == "EMPTY" then
-        self:_fetchSlot(0)
-    end
-    if self.slots[1] and self.slots[1].status == "EMPTY" then
-        self:_fetchSlot(1)
-    end
-    if self.slots[2] and self.slots[2].status == "EMPTY" then
-        self:_fetchSlot(2)
+    for offset = 0, k do
+        if self.slots[offset] and self.slots[offset].status == "EMPTY" then
+            self:_fetchSlot(offset)
+        end
     end
 end
 
@@ -433,6 +431,9 @@ end
 
 --- Advance Sliding Window when sentence N finishes (Zero-gap transition)
 function PlaybackQueue:_advanceWindow()
+    local k = (self.settings and self.settings:get("preload_count")) or 2
+    k = math.max(1, math.min(7, k))
+
     -- Check Slot 1 (N+1)
     local next_slot = self.slots[1]
     if not next_slot then
@@ -445,10 +446,11 @@ function PlaybackQueue:_advanceWindow()
     local old_page = self.current_page
     local new_page = next_slot.page
 
-    -- Shift slots: Slot 1 -> Slot 0; Slot 2 -> Slot 1
-    self.slots[0] = self.slots[1]
-    self.slots[1] = self.slots[2]
-    self.slots[2] = nil
+    -- Shift slots down by 1: slots[i] = slots[i+1]
+    for i = 0, k - 1 do
+        self.slots[i] = self.slots[i + 1]
+    end
+    self.slots[k] = nil
 
     self.current_page = self.slots[0].page
     self.current_index = self.slots[0].chunk_index
@@ -458,15 +460,14 @@ function PlaybackQueue:_advanceWindow()
         self:_turnPage(new_page)
     end
 
-    -- Populate new Slot 2 (N+2) and prefetch
-    local p2, i2 = nil, nil
-    if self.slots[1] then
-        p2, i2 = self:_getNextPosition(self.slots[1].page, self.slots[1].chunk_index)
-    end
-    if p2 and i2 then
-        self.slots[2] = self:_createSlotItem(p2, i2, self.queue_generation)
-        if self.slots[2] and self.slots[2].status == "EMPTY" then
-            self:_fetchSlot(2)
+    -- Populate the new tail slot (Slot k)
+    if self.slots[k - 1] then
+        local pk, ik = self:_getNextPosition(self.slots[k - 1].page, self.slots[k - 1].chunk_index)
+        if pk and ik then
+            self.slots[k] = self:_createSlotItem(pk, ik, self.queue_generation)
+            if self.slots[k] and self.slots[k].status == "EMPTY" then
+                self:_fetchSlot(k)
+            end
         end
     end
 
