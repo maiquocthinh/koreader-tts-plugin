@@ -209,7 +209,7 @@ function KoreaderTTS:addToMainMenu(menu_items)
     end
 
     table.insert(sub_items, {
-        text = _("⏲ Hẹn giờ tắt đọc..."),
+        text = _("⏲ Hẹn giờ tắt đọc"),
         callback = function(touchmenu_instance)
             if touchmenu_instance then
                 touchmenu_instance:closeMenu()
@@ -222,7 +222,7 @@ function KoreaderTTS:addToMainMenu(menu_items)
         end,
     })
     table.insert(sub_items, {
-        text = _("⚙ Cài đặt tiện ích..."),
+        text = _("⚙ Cài đặt tiện ích"),
         callback = function(touchmenu_instance)
             local ok_l, log = pcall(require, "logger")
             if ok_l and log then log.warn("TTS: Cài đặt tiện ích callback invoked!") end
@@ -798,7 +798,7 @@ function KoreaderTTS:showWordMappingDialog()
     local buttons = {
         {
             {
-                text = _("+ Thêm từ mapping mới..."),
+                text = _("+ Thêm từ mới"),
                 align = "left",
                 callback = function()
                     if this.word_mapping_dialog then
@@ -1202,7 +1202,7 @@ function KoreaderTTS:showSettingsDialog()
     local buttons = {
         {
             {
-                text = _("1. Cài đặt Máy chủ, Giọng đọc & Tốc độ..."),
+                text = _("1. Cài đặt Máy chủ, Giọng đọc & Tốc độ"),
                 align = "left",
                 callback = function()
                     UIManager:close(this.settings_dialog)
@@ -1214,7 +1214,7 @@ function KoreaderTTS:showSettingsDialog()
         },
         {
             {
-                text = _("2. Quản lý từ điển phát âm..."),
+                text = _("2. Quản lý từ điển phát âm"),
                 align = "left",
                 callback = function()
                     UIManager:close(this.settings_dialog)
