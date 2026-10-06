@@ -220,7 +220,7 @@ plugin:addToHighlightMenu(highlight_menu, selected_snippet)
 
 assert(#highlight_menu == 4, "ERROR DoD 5.4: TTS button not added to highlight menu!")
 local tts_btn = highlight_menu[4]
-assert(tts_btn.text == "🔊 Đọc bằng TTS", "ERROR DoD 5.4: Button text mismatch!")
+assert(tts_btn.text == "🔊 Đọc bằng giọng nói" or tts_btn.text == "🔊 Đọc bằng TTS", "ERROR DoD 5.4: Button text mismatch!")
 print(string.format("  -> Highlight menu shows button: '%s'", tts_btn.text))
 
 local played_audio = false

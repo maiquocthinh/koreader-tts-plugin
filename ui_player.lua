@@ -43,6 +43,9 @@ if not ok_btn then Button = WidgetContainer end
 local ok_bd, ButtonDialog = pcall(require, "ui/widget/buttondialog")
 if not ok_bd or not ButtonDialog then ButtonDialog = WidgetContainer end
 
+local ok_id, InputDialog = pcall(require, "ui/widget/inputdialog")
+if not ok_id or not InputDialog then InputDialog = WidgetContainer end
+
 local ok_text, TextWidget = pcall(require, "ui/widget/textwidget")
 if not ok_text then TextWidget = WidgetContainer end
 
@@ -858,89 +861,66 @@ function UIPlayer:onPrevPage()
     end
 end
 
---- Show popup dialog to choose playback speed directly
+--- Show popup dialog to choose playback speed directly (matches InputDialog in Settings)
 function UIPlayer:showSpeedDialog()
     local this = self
     local cur_speed = self.audio_backend and self.audio_backend.speed or 1.0
-    local dialog
+    local input_dialog
 
-    local function selectSpeed(spd)
-        if this.audio_backend then
-            this.audio_backend:setSpeed(spd)
-        end
-        if this.settings then
-            this.settings:set("speed", spd)
-            this.settings:save()
-        end
-        if this.speed_btn and this.speed_btn.setText then
-            this.speed_btn:setText(string.format(_("Tốc độ: %.1fx"), spd))
-        end
-        if this.mini_label_btn and this.mini_label_btn.setText then
-            this.mini_label_btn:setText(string.format("%d/%d · %.1fx", this.current_index, this.total_on_page, spd))
-        end
-        if dialog then
-            UIManager:close(dialog)
-        end
-        if this.control_bar and UIManager and UIManager.setDirty then
-            pcall(UIManager.setDirty, UIManager, this.control_bar, "ui")
-        end
-        -- Cleanly repaint uncovered screen area to avoid ghosting artifacts
-        if UIManager and UIManager.setDirty then
-            pcall(UIManager.setDirty, UIManager, nil, "ui")
-        end
-    end
-
-    local buttons = {
-        {
+    input_dialog = InputDialog:new{
+        title = _("Tốc độ đọc (0.5x - 2.0x)"),
+        input = tostring(cur_speed),
+        input_hint = "1.0",
+        buttons = {
             {
-                text = (math.abs(cur_speed - 0.75) < 0.05 and "✓ " or "") .. "0.75x",
-                callback = function() selectSpeed(0.75) end,
-            },
-            {
-                text = (math.abs(cur_speed - 1.0) < 0.05 and "✓ " or "") .. _("1.0x (Mặc định)"),
-                callback = function() selectSpeed(1.0) end,
-            },
-        },
-        {
-            {
-                text = (math.abs(cur_speed - 1.25) < 0.05 and "✓ " or "") .. "1.25x",
-                callback = function() selectSpeed(1.25) end,
-            },
-            {
-                text = (math.abs(cur_speed - 1.5) < 0.05 and "✓ " or "") .. "1.5x",
-                callback = function() selectSpeed(1.5) end,
-            },
-        },
-        {
-            {
-                text = (math.abs(cur_speed - 1.75) < 0.05 and "✓ " or "") .. "1.75x",
-                callback = function() selectSpeed(1.75) end,
-            },
-            {
-                text = (math.abs(cur_speed - 2.0) < 0.05 and "✓ " or "") .. "2.0x",
-                callback = function() selectSpeed(2.0) end,
-            },
-        },
-        {
-            {
-                text = _("Đóng"),
-                callback = function()
-                    if dialog then
-                        UIManager:close(dialog)
-                        if UIManager.setDirty then
+                {
+                    text = _("Hủy"),
+                    id = "cancel",
+                    callback = function()
+                        UIManager:close(input_dialog)
+                        if UIManager and UIManager.setDirty then
                             pcall(UIManager.setDirty, UIManager, nil, "ui")
                         end
-                    end
-                end,
+                    end,
+                },
+                {
+                    text = _("Lưu"),
+                    is_enter_default = true,
+                    callback = function()
+                        local val = tonumber(input_dialog:getInputText())
+                        if val then
+                            val = math.max(0.5, math.min(2.0, val))
+                            if this.audio_backend then
+                                this.audio_backend:setSpeed(val)
+                            end
+                            if this.settings then
+                                this.settings:set("speed", val)
+                                this.settings:save()
+                            end
+                            if this.speed_btn and this.speed_btn.setText then
+                                this.speed_btn:setText(string.format(_("Tốc độ: %.1fx"), val))
+                            end
+                            if this.mini_label_btn and this.mini_label_btn.setText then
+                                this.mini_label_btn:setText(string.format("%d/%d · %.1fx", this.current_index, this.total_on_page, val))
+                            end
+                        end
+                        UIManager:close(input_dialog)
+                        if this.control_bar and UIManager and UIManager.setDirty then
+                            pcall(UIManager.setDirty, UIManager, this.control_bar, "ui")
+                        end
+                        -- Cleanly repaint uncovered screen area to avoid ghosting artifacts
+                        if UIManager and UIManager.setDirty then
+                            pcall(UIManager.setDirty, UIManager, nil, "ui")
+                        end
+                    end,
+                },
             },
         },
     }
-
-    dialog = ButtonDialog:new{
-        title = _("Chọn tốc độ đọc (TTS Speed)"),
-        buttons = buttons,
-    }
-    UIManager:show(dialog)
+    UIManager:show(input_dialog)
+    if input_dialog.onShowKeyboard then
+        input_dialog:onShowKeyboard()
+    end
 end
 
 function UIPlayer:onCycleSpeed()
@@ -970,7 +950,7 @@ function UIPlayer:onCycleSpeed()
     end
 end
 
---- Show popup dialog to choose sleep timer directly
+--- Show popup dialog to choose sleep timer directly (matches vertical single-column list)
 function UIPlayer:showSleepTimerDialog()
     local this = self
     if not self.sleep_timer then return end
@@ -997,31 +977,36 @@ function UIPlayer:showSleepTimerDialog()
     local buttons = {
         {
             {
-                text = (cur_mode == "0" and "✓ " or "") .. _("Tắt hẹn giờ"),
+                text = _("Tắt hẹn giờ") .. (cur_mode == "0" and "  ✔" or ""),
+                align = "left",
                 callback = function() selectTimer("0") end,
             },
+        },
+        {
             {
-                text = (cur_mode == "15" and "✓ " or "") .. _("15 phút"),
+                text = _("15 phút") .. (cur_mode == "15" and "  ✔" or ""),
+                align = "left",
                 callback = function() selectTimer("15") end,
             },
         },
         {
             {
-                text = (cur_mode == "30" and "✓ " or "") .. _("30 phút"),
+                text = _("30 phút") .. (cur_mode == "30" and "  ✔" or ""),
+                align = "left",
                 callback = function() selectTimer("30") end,
             },
+        },
+        {
             {
-                text = (cur_mode == "45" and "✓ " or "") .. _("45 phút"),
+                text = _("45 phút") .. (cur_mode == "45" and "  ✔" or ""),
+                align = "left",
                 callback = function() selectTimer("45") end,
             },
         },
         {
             {
-                text = (cur_mode == "60" and "✓ " or "") .. _("60 phút"),
-                callback = function() selectTimer("60") end,
-            },
-            {
-                text = (cur_mode == "page" and "✓ " or "") .. _("Hết trang hiện tại"),
+                text = _("Khi đọc hết trang hiện tại") .. (cur_mode == "page" and "  ✔" or ""),
+                align = "left",
                 callback = function() selectTimer("page") end,
             },
         },
@@ -1041,7 +1026,7 @@ function UIPlayer:showSleepTimerDialog()
     }
 
     dialog = ButtonDialog:new{
-        title = _("Hẹn giờ tắt đọc (Sleep Timer)"),
+        title = _("Hẹn giờ tắt đọc"),
         buttons = buttons,
     }
     UIManager:show(dialog)

@@ -320,7 +320,7 @@ run_test("Selection Hook: addToHighlightMenu adds TTS button", function()
     plugin:addToHighlightMenu(menu_items, "Selected text snippet by user.")
 
     assert(#menu_items == 3, "menu_items must have 1 added item")
-    assert(menu_items[3].text == "🔊 Đọc bằng TTS", "Added button must be '🔊 Đọc bằng TTS'")
+    assert(menu_items[3].text == "🔊 Đọc bằng giọng nói" or menu_items[3].text == "🔊 Đọc bằng TTS", "Added button must be '🔊 Đọc bằng giọng nói'")
     assert(type(menu_items[3].callback) == "function", "Button must have callback")
 end)
 

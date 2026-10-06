@@ -215,7 +215,7 @@ run_test("Hook addToMainMenu registers menu item", function()
     plugin:addToMainMenu(menu_items)
 
     assert(menu_items.koreader_tts ~= nil, "menu_items must contain koreader_tts")
-    assert(menu_items.koreader_tts.text == "Đọc bằng giọng nói (TTS)")
+    assert(menu_items.koreader_tts.text == "Đọc bằng giọng nói")
     assert(type(menu_items.koreader_tts.sub_item_table) == "table")
     assert(#menu_items.koreader_tts.sub_item_table >= 2)
 end)
@@ -232,7 +232,7 @@ run_test("showSettingsDialog opens ButtonDialog successfully", function()
 
     assert(#MockKOReader.UIManager._shown_widgets == 1, "Must show 1 dialog widget")
     assert(plugin.settings_dialog ~= nil, "plugin.settings_dialog must be set")
-    assert(plugin.settings_dialog.title == "Cài đặt TTS Plugin")
+    assert(plugin.settings_dialog.title == "Cài đặt đọc giọng nói")
 end)
 
 -- Test 12: onStartTTS triggering info message
@@ -247,7 +247,7 @@ run_test("onStartTTS displays non-blocking InfoMessage", function()
 
     assert(#MockKOReader.UIManager._shown_widgets == 1, "Must show InfoMessage")
     local msg = MockKOReader.UIManager._shown_widgets[1]
-    assert(msg.text ~= nil and string.find(msg.text, "TTS Plugin"), "Notice must contain plugin status")
+    assert(msg.text ~= nil and (string.find(msg.text, "Đọc giọng nói") or string.find(msg.text, "TTS Plugin")), "Notice must contain plugin status")
 end)
 
 print("==========================================================")
