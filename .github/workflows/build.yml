@@ -57,6 +57,7 @@ jobs:
           cp text_chunker.lua dist/koreader_tts.koplugin/
           cp tts_client.lua dist/koreader_tts.koplugin/
           cp audio_backend.lua dist/koreader_tts.koplugin/
+          cp android_player.lua dist/koreader_tts.koplugin/
           cp playback_queue.lua dist/koreader_tts.koplugin/
           cp ui_player.lua dist/koreader_tts.koplugin/
           cp sleep_timer.lua dist/koreader_tts.koplugin/
