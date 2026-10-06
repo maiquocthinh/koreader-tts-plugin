@@ -125,6 +125,7 @@ function TTSClient:new(options)
 
     instance.server_url = options.server_url or "http://192.168.1.100:7860"
     instance.voice = options.voice or "vi-VN-NamMinh"
+    instance.audio_format = options.audio_format or "wav"
     instance.api_key = options.api_key or ""
     instance.timeout = options.request_timeout or 15
     instance.cache_dir = options.cache_dir or "cache/tts"
@@ -159,23 +160,45 @@ function TTSClient:_ensureCacheDir()
     end
 end
 
---- Generate deterministic cache file path for (text, voice) pair
--- @param text Sentence text string
--- @param voice Voice ID
--- @return string Absolute or relative file path to .wav file
-function TTSClient:getCacheFilePath(text, voice)
-    voice = voice or self.voice
-    local key = string.format("%s:%s", text or "", voice or "")
-    local hash = fnv1a_hash(key)
-    return string.format("%s/chunk_%s.wav", self.cache_dir, hash)
+--- Verify format magic bytes in file header
+local function verify_audio_header(header, format)
+    if not header or #header < 2 then return false end
+    format = format or "wav"
+    if format == "flac" then
+        return (#header >= 4 and header:sub(1, 4) == "fLaC")
+    elseif format == "mp3" then
+        local b1, b2 = header:byte(1, 2)
+        return ((b1 == 0xFF and (b2 >= 0xE0 or b2 == 0xFB or b2 == 0xF3 or b2 == 0xF2)) or header:sub(1, 3) == "ID3")
+    elseif format == "opus" then
+        return (#header >= 4 and header:sub(1, 4) == "OggS")
+    elseif format == "pcm" then
+        return (#header > 0)
+    else
+        return (#header >= 12 and header:sub(1, 4) == "RIFF" and header:sub(9, 12) == "WAVE")
+    end
 end
 
---- Check if a valid WAV cache file exists on disk (verifies RIFF header)
+--- Generate deterministic cache file path for (text, voice, format)
 -- @param text Sentence text string
 -- @param voice Voice ID
+-- @param format Audio format ("wav" | "flac" | "mp3" | "opus")
+-- @return string Absolute or relative file path
+function TTSClient:getCacheFilePath(text, voice, format)
+    voice = voice or self.voice
+    format = format or self.audio_format or "wav"
+    local key = string.format("%s:%s:%s", text or "", voice or "", format or "wav")
+    local hash = fnv1a_hash(key)
+    return string.format("%s/chunk_%s.%s", self.cache_dir, hash, format)
+end
+
+--- Check if a valid audio cache file exists on disk (verifies format magic bytes)
+-- @param text Sentence text string
+-- @param voice Voice ID
+-- @param format Audio format ("wav" | "flac" | "mp3" | "opus")
 -- @return boolean is_valid, string file_path
-function TTSClient:hasValidCache(text, voice)
-    local path = self:getCacheFilePath(text, voice)
+function TTSClient:hasValidCache(text, voice, format)
+    format = format or self.audio_format or "wav"
+    local path = self:getCacheFilePath(text, voice, format)
     local f = io.open(path, "rb")
     if not f then
         return false, nil
@@ -184,8 +207,7 @@ function TTSClient:hasValidCache(text, voice)
     local header = f:read(12)
     f:close()
 
-    -- Check first 4 bytes "RIFF" and bytes 9-12 "WAVE"
-    if header and #header >= 12 and header:sub(1, 4) == "RIFF" and header:sub(9, 12) == "WAVE" then
+    if verify_audio_header(header, format) then
         return true, path
     end
     return false, nil
@@ -197,11 +219,17 @@ function TTSClient:clearCache(max_age_seconds)
     max_age_seconds = max_age_seconds or 86400
     local now = os.time()
 
+    local is_audio_cache = function(fname)
+        return fname:match("%.wav$") or fname:match("%.flac$")
+            or fname:match("%.mp3$") or fname:match("%.opus$")
+            or fname:match("%.tmp$")
+    end
+
     local ok, lfs = pcall(require, "lfs")
     if ok and lfs and lfs.dir then
         pcall(function()
             for file in lfs.dir(self.cache_dir) do
-                if file:match("%.wav$") or file:match("%.tmp$") then
+                if is_audio_cache(file) then
                     local full_path = self.cache_dir .. "/" .. file
                     local attrs = lfs.attributes(full_path)
                     if attrs and attrs.modification and (now - attrs.modification > max_age_seconds) then
@@ -214,13 +242,13 @@ function TTSClient:clearCache(max_age_seconds)
         -- Fallback when lfs is not available (using native list command)
         pcall(function()
             local is_win = (package.config:sub(1, 1) == "\\")
-            local list_cmd = is_win and string.format('dir /B "%s\\*.wav" "%s\\*.tmp" 2>nul', self.cache_dir:gsub("/", "\\"), self.cache_dir:gsub("/", "\\"))
-                                    or string.format('find "%s" -maxdepth 1 -name "*.wav" -o -name "*.tmp" 2>/dev/null', self.cache_dir)
+            local list_cmd = is_win and string.format('dir /B "%s\\*.*" 2>nul', self.cache_dir:gsub("/", "\\"))
+                                    or string.format('find "%s" -maxdepth 1 -type f 2>/dev/null', self.cache_dir)
             local handle = io.popen(list_cmd)
             if handle then
                 for line in handle:lines() do
                     line = line:gsub("[\r\n]", "")
-                    if line ~= "" then
+                    if line ~= "" and is_audio_cache(line) then
                         local full_path = is_win and (self.cache_dir .. "/" .. line) or line
                         os.remove(full_path)
                     end
@@ -240,6 +268,7 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
     opts = opts or {}
     local voice = opts.voice or self.voice
     local speed = opts.speed or 1.0
+    local format = opts.response_format or opts.format or self.audio_format or "wav"
     local timeout = opts.timeout or self.timeout
     local server_url = opts.server_url or self.server_url
     local api_key = opts.api_key or self.api_key
@@ -254,14 +283,22 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
         return cancel_handle
     end
 
+    local req_start_time = (UIManager and UIManager.getTime and UIManager:getTime()) or os.time()
+    local function finish_callback(ok, res)
+        local req_end_time = (UIManager and UIManager.getTime and UIManager:getTime()) or os.time()
+        self.last_latency_ms = math.max(1, math.floor((req_end_time - req_start_time) * 1000))
+        if callback then callback(ok, res) end
+    end
+
     -- 1. Check disk cache first
-    local cached, cache_path = self:hasValidCache(text, voice)
+    local cached, cache_path = self:hasValidCache(text, voice, format)
     if cached then
+        self.last_latency_ms = 0
         if callback then callback(true, cache_path) end
         return cancel_handle
     end
 
-    local final_wav_path = self:getCacheFilePath(text, voice)
+    local final_wav_path = self:getCacheFilePath(text, voice, format)
     local temp_wav_path = final_wav_path .. ".tmp"
 
     -- 2. Mock transport (for standalone unit tests)
@@ -269,16 +306,16 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
         self._mock_transport(text, voice, function(ok, data_or_err)
             if is_cancelled then return end
             if not ok then
-                if callback then callback(false, data_or_err) end
+                finish_callback(false, data_or_err)
                 return
             end
             local f = io.open(final_wav_path, "wb")
             if f then
                 f:write(data_or_err)
                 f:close()
-                if not is_cancelled and callback then callback(true, final_wav_path) end
+                if not is_cancelled then finish_callback(true, final_wav_path) end
             else
-                if not is_cancelled and callback then callback(false, "Không thể ghi file cache") end
+                if not is_cancelled then finish_callback(false, "Không thể ghi file cache") end
             end
         end)
         return cancel_handle
@@ -289,6 +326,7 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
         input = text,
         voice = voice,
         speed = speed,
+        response_format = format,
     })
 
     local url_info = parse_url(server_url)
@@ -304,25 +342,29 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
     end
 
     if ok_socket and socket and socket.tcp and ok_ssl then
-        self:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav_path, final_wav_path, function(ok, res)
+        self:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav_path, final_wav_path, format, function(ok, res)
             if is_cancelled then return end
             if ok then
-                if callback then callback(true, res) end
+                finish_callback(true, res)
             else
+                local ok_l, log = pcall(require, "logger")
+                if ok_l and log and log.err then
+                    log.err("TTSClient: _fetchViaSocket failed:", tostring(res))
+                end
                 -- If socket fetch failed, fallback to curl
-                self:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav_path, final_wav_path, callback)
+                self:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav_path, final_wav_path, format, finish_callback)
             end
         end, function() return is_cancelled end)
         return cancel_handle
     end
 
     -- 5. Tier 2: Fallback to curl when LuaSocket/LuaSec is unavailable
-    self:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav_path, final_wav_path, callback)
+    self:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav_path, final_wav_path, format, finish_callback)
     return cancel_handle
 end
 
 --- Internal socket fetch implementation with coroutine non-blocking streaming
-function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav_path, final_wav_path, callback, is_cancelled_fn)
+function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav_path, final_wav_path, format, callback, is_cancelled_fn)
     local socket = require("socket")
 
     local headers = {
@@ -342,10 +384,28 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
         local tcp = socket.tcp()
         local start_time = os.time()
 
-        -- Connect with a small timeout (5s) to avoid non-blocking "operation already in progress" error
-        tcp:settimeout(math.min(timeout, 5))
-        local conn_ok, conn_err = tcp:connect(url_info.host, url_info.port)
+        -- DNS Caching: Cache resolved IP to eliminate repeated getaddrinfo blocking latency
+        TTSClient._dns_cache = TTSClient._dns_cache or {}
+        local target_host = url_info.host
+        local is_ip = target_host:match("^%d+%.%d+%.%d+%.%d+$")
+        local connect_host = target_host
+        if not is_ip then
+            if TTSClient._dns_cache[target_host] then
+                connect_host = TTSClient._dns_cache[target_host]
+            elseif socket.dns and socket.dns.toip then
+                local resolved = socket.dns.toip(target_host)
+                if resolved then
+                    TTSClient._dns_cache[target_host] = resolved
+                    connect_host = resolved
+                end
+            end
+        end
+
+        -- Connect with a sensible timeout (2.5s) to avoid UI lockup
+        tcp:settimeout(math.min(timeout, 2.5))
+        local conn_ok, conn_err = tcp:connect(connect_host, url_info.port)
         if not conn_ok then
+            if TTSClient._dns_cache then TTSClient._dns_cache[target_host] = nil end
             tcp:close()
             return false, "Lỗi kết nối tới " .. url_info.host .. ":" .. url_info.port .. " (" .. tostring(conn_err) .. ")"
         end
@@ -363,7 +423,7 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
                 }
                 tcp = ssl.wrap(tcp, ssl_params)
                 tcp:sni(url_info.host)
-                tcp:settimeout(math.min(timeout, 5))
+                tcp:settimeout(math.min(timeout, 3.0))
                 local hs_ok, hs_err = tcp:dohandshake()
                 tcp:settimeout(0)
                 if not hs_ok then
@@ -383,7 +443,7 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
             local sent, send_err, last_byte = tcp:send(full_request, total_sent + 1)
             if sent then
                 total_sent = sent
-            elseif send_err == "timeout" then
+            elseif send_err == "timeout" or send_err == "wantwrite" or send_err == "wantread" then
                 total_sent = last_byte or total_sent
                 coroutine.yield()
             else
@@ -406,7 +466,7 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
                 if chunk == "" or chunk == "\r" then
                     header_end = true
                 end
-            elseif recv_err == "timeout" then
+            elseif recv_err == "timeout" or recv_err == "wantread" then
                 if partial and partial ~= "" then
                     response_buffer = response_buffer .. partial
                 end
@@ -433,7 +493,7 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
             return false, string.format("Máy chủ TTS phản hồi lỗi HTTP %s: %s", tostring(status_code or "Unknown"), tostring(err_body))
         end
 
-        -- Read binary stream into file
+        -- Read binary stream into file with batching to avoid coroutine thrashing
         local out_file, file_err = io.open(temp_wav_path, "wb")
         if not out_file then
             tcp:close()
@@ -441,21 +501,38 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
         end
 
         while true do
-            local chunk, recv_err, partial = tcp:receive(4096)
-            local data = chunk or partial
-            if data and #data > 0 then
-                out_file:write(data)
+            local bytes_in_tick = 0
+            local eof = false
+            local socket_err = nil
+
+            while bytes_in_tick < 65536 do
+                local chunk, recv_err, partial = tcp:receive(16384)
+                local data = chunk or partial
+                if data and #data > 0 then
+                    out_file:write(data)
+                    bytes_in_tick = bytes_in_tick + #data
+                end
+
+                if chunk == nil and recv_err == "closed" then
+                    eof = true
+                    break
+                elseif chunk == nil and (recv_err == "timeout" or recv_err == "wantread") then
+                    break
+                elseif chunk == nil and (recv_err ~= "timeout" and recv_err ~= "wantread") then
+                    socket_err = recv_err
+                    break
+                end
             end
 
-            if chunk == nil and recv_err == "closed" then
+            if eof then
                 break
-            elseif chunk == nil and recv_err == "timeout" then
-                coroutine.yield()
-            elseif chunk == nil and recv_err ~= "timeout" then
+            end
+
+            if socket_err then
                 out_file:close()
                 os.remove(temp_wav_path)
                 tcp:close()
-                return false, "Mất kết nối khi đang tải file âm thanh: " .. tostring(recv_err)
+                return false, "Mất kết nối khi đang tải file âm thanh: " .. tostring(socket_err)
             end
 
             if os.time() - start_time > timeout then
@@ -464,20 +541,22 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
                 tcp:close()
                 return false, "Hết thời gian tải file âm thanh"
             end
+
+            coroutine.yield("downloading")
         end
 
         out_file:close()
         tcp:close()
 
-        -- Verify RIFF magic
+        -- Verify audio header based on format
         local verify_file = io.open(temp_wav_path, "rb")
         if not verify_file then return false, "Không tìm thấy file sau khi tải" end
-        local magic = verify_file:read(4)
+        local header = verify_file:read(12)
         verify_file:close()
 
-        if magic ~= "RIFF" then
+        if not verify_audio_header(header, format) then
             os.remove(temp_wav_path)
-            return false, "Dữ liệu trả về không phải âm thanh WAV hợp lệ (thiếu RIFF header)"
+            return false, string.format("Dữ liệu trả về không phải âm thanh %s hợp lệ", tostring(format or "wav"):upper())
         end
 
         os.remove(final_wav_path)
@@ -491,18 +570,21 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
             return
         end
 
-        local ok, success_or_cont, result_or_err = coroutine.resume(co)
+        local ok, status_tag, result_or_err = coroutine.resume(co)
         if not ok then
             os.remove(temp_wav_path)
-            if callback then callback(false, "Lỗi coroutine: " .. tostring(success_or_cont)) end
+            if callback then callback(false, "Lỗi coroutine: " .. tostring(status_tag)) end
             return
         end
 
         if coroutine.status(co) == "dead" then
-            if callback then callback(success_or_cont, result_or_err) end
+            if callback then callback(status_tag, result_or_err) end
         else
+            -- Adaptive scheduling: 20ms during active download, 80ms while awaiting server synthesis
+            -- This eliminates 75% of CPU timer wakeups on Android/E-ink devices, preventing UI lag.
+            local delay = (status_tag == "downloading") and 0.02 or 0.08
             if UIManager and type(UIManager.scheduleIn) == "function" then
-                UIManager:scheduleIn(0.02, pump)
+                UIManager:scheduleIn(delay, pump)
             end
         end
     end
@@ -511,7 +593,7 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
 end
 
 --- Fallback implementation using curl (handles TLS, SNI, self-signed certs, redirects)
-function TTSClient:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav_path, final_wav_path, callback)
+function TTSClient:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav_path, final_wav_path, format, callback)
     local tmp_json = temp_wav_path .. ".json"
     local jf = io.open(tmp_json, "wb")
     if jf then
@@ -528,9 +610,10 @@ function TTSClient:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav
     --   -k: insecure (skip CA cert verification for device environments)
     --   -L: follow HTTP redirects (301, 302, 307)
     --   --data-binary: send exact UTF-8 payload with newlines preserved
+    local effective_timeout = math.max(timeout or 15, 30)
     local curl_cmd = string.format(
         'curl -s -k -L -X POST "%s" -H "Content-Type: application/json" -H "User-Agent: KOReader-TTS/1.0" %s --data-binary @"%s" -o "%s" --max-time %d >/dev/null 2>&1',
-        full_endpoint, auth_header, tmp_json, temp_wav_path, timeout
+        full_endpoint, auth_header, tmp_json, temp_wav_path, effective_timeout
     )
 
     local exit_marker = temp_wav_path .. ".exit"
@@ -544,7 +627,7 @@ function TTSClient:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav
         if verify_file then
             local header = verify_file:read(12)
             verify_file:close()
-            if header and #header >= 12 and header:sub(1, 4) == "RIFF" and header:sub(9, 12) == "WAVE" then
+            if header and verify_audio_header(header, format) then
                 os.remove(final_wav_path)
                 os.rename(temp_wav_path, final_wav_path)
                 if callback then callback(true, final_wav_path) end
@@ -588,8 +671,10 @@ function TTSClient:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav
             checkResult()
         end
     else
-        -- Unix / Linux / Android / E-ink: asynchronous background curl prevents UI thread freeze & ANR
-        local bg_cmd = string.format('(%s; echo $? > "%s") &', curl_cmd, exit_marker)
+        -- Unix / Linux / Android / E-ink: completely detached background subshell
+        -- </dev/null >/dev/null 2>&1 & severs all pipe descriptors so os.execute returns in 0ms,
+        -- completely preventing UI thread freezes, fread blocking, and Android OS ANRs.
+        local bg_cmd = string.format('sh -c \'(%s; echo $? > "%s") </dev/null >/dev/null 2>&1 &\'', curl_cmd, exit_marker)
         pcall(os.execute, bg_cmd)
 
         local start_poll = (UIManager and UIManager.getTime and UIManager:getTime()) or os.time()

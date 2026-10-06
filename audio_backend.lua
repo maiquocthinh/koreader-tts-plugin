@@ -17,6 +17,16 @@ if not ok_device or not Device then
     }
 end
 
+local ok_log, logger = pcall(require, "logger")
+if not ok_log or not logger then
+    logger = {
+        warn = function(...) end,
+        info = function(...) end,
+        err = function(...) end,
+        dbg = function(...) end,
+    }
+end
+
 local ok_uimanager, UIManager = pcall(require, "ui/uimanager")
 if not ok_uimanager or not UIManager then
     UIManager = {
@@ -130,6 +140,34 @@ function AudioBackend.getWavDuration(file_path)
     return duration, byte_rate, sample_rate
 end
 
+--- Parse FLAC file header to extract exact duration (seconds)
+-- @param file_path Path to .flac file
+-- @return number duration_seconds, number sample_rate, number channels
+function AudioBackend.getFlacDuration(file_path)
+    local f = io.open(file_path, "rb")
+    if not f then return 0, 0, 0 end
+    local header = f:read(42)
+    f:close()
+    if not header or #header < 26 or header:sub(1, 4) ~= "fLaC" then
+        return 0, 0, 0
+    end
+    -- STREAMINFO metadata block (bytes 19..26, 1-indexed in Lua string)
+    local b1 = header:byte(19) or 0
+    local b2 = header:byte(20) or 0
+    local b3 = header:byte(21) or 0
+    local b4 = header:byte(22) or 0
+    local b5 = header:byte(23) or 0
+    local b6 = header:byte(24) or 0
+    local b7 = header:byte(25) or 0
+    local b8 = header:byte(26) or 0
+
+    local sr = (b1 * 4096) + (b2 * 16) + math.floor(b3 / 16)
+    local ch = math.floor((b3 % 16) / 2) + 1
+    local total_samples = (b4 % 16) * 4294967296 + (b5 * 16777216) + (b6 * 65536) + (b7 * 256) + b8
+    local duration = (sr > 0) and (total_samples / sr) or 0
+    return duration, sr, ch
+end
+
 --- Initialize AudioBackend instance
 -- @param options Config table: { backend_type, speed }
 -- @return AudioBackend instance
@@ -143,6 +181,7 @@ function AudioBackend:new(options)
     instance._is_paused = false
     instance._current_token = 0
     instance._active_timer = nil
+    instance._active_poll_timer = nil
     instance._active_process = nil
     instance._sdl_device = nil
     instance._android_player = nil
@@ -209,11 +248,15 @@ function AudioBackend:stop()
     self._remaining_play_time = nil
     self._on_finished_cb = nil
 
-    -- Cancel timer if scheduled
+    -- Cancel timers if scheduled
     if self._active_timer and UIManager.unschedule then
         UIManager:unschedule(self._active_timer)
     end
     self._active_timer = nil
+    if self._active_poll_timer and UIManager.unschedule then
+        UIManager:unschedule(self._active_poll_timer)
+    end
+    self._active_poll_timer = nil
 
     -- Stop Android MediaPlayer if active
     if self._android_player then
@@ -257,6 +300,10 @@ function AudioBackend:pause()
         if self._active_timer and UIManager.unschedule then
             UIManager:unschedule(self._active_timer)
             self._active_timer = nil
+        end
+        if self._active_poll_timer and UIManager.unschedule then
+            UIManager:unschedule(self._active_poll_timer)
+            self._active_poll_timer = nil
         end
 
         if self._android_player then
@@ -328,19 +375,7 @@ function AudioBackend:play(file_path, on_finished, opts)
     self._is_playing = true
     self._is_paused = false
 
-    -- Calculate file duration
-    local duration, byte_rate, sample_rate = AudioBackend.getWavDuration(file_path)
-    if duration <= 0 then
-        duration = 1.0
-    end
-    local actual_play_time = math.max(0.2, duration / speed)
-
-    local now = (UIManager.getTime and UIManager:getTime()) or os.time()
-    self._play_end_time = now + actual_play_time
-    self._remaining_play_time = actual_play_time
-    self._on_finished_cb = on_finished
-
-    -- Dispatch to platform driver
+    -- Dispatch to platform driver first so native player initializes and gets metadata
     local driver_dispatched = false
     if self.driver_name == "linux" then
         driver_dispatched = self:_playLinux(file_path, speed)
@@ -348,19 +383,114 @@ function AudioBackend:play(file_path, on_finished, opts)
         driver_dispatched = self:_playAndroid(file_path, speed)
     end
 
-    -- Schedule completion timer (used for Desktop/Test and driver fallback)
-    local this = self
-    self._active_timer = UIManager:scheduleIn(actual_play_time, function()
-        -- Ensure session token is still valid and was not cancelled by stop() or paused
-        if this._current_token == session_token and this._is_playing and not this._is_paused then
-            this._is_playing = false
-            this._is_paused = false
-            this._active_timer = nil
-            if on_finished then
-                pcall(on_finished, true)
+    -- Calculate file duration
+    local duration = 0
+    -- 1. On Android: MediaPlayer natively knows the EXACT duration for all formats (WAV, FLAC, MP3, OPUS)
+    if self.driver_name == "android" and self._android_player and self._android_player.getDurationMs then
+        local d_ms = self._android_player:getDurationMs()
+        if d_ms and d_ms > 0 then
+            duration = d_ms / 1000.0
+        end
+    end
+
+    -- 2. If duration not known from driver, parse headers
+    if duration <= 0 then
+        local dur_wav = AudioBackend.getWavDuration(file_path)
+        if dur_wav and dur_wav > 0 then
+            duration = dur_wav
+        else
+            local dur_flac = AudioBackend.getFlacDuration(file_path)
+            if dur_flac and dur_flac > 0 then
+                duration = dur_flac
             end
         end
-    end)
+    end
+
+    -- 3. Fallback estimation if still unknown
+    if duration <= 0 then
+        local f = io.open(file_path, "rb")
+        if f then
+            local sz = f:seek("end") or 0
+            f:close()
+            if file_path:match("%.opus$") then
+                duration = math.max(0.5, sz / 3500)
+            elseif file_path:match("%.mp3$") then
+                duration = math.max(0.5, sz / 8000)
+            elseif file_path:match("%.flac$") then
+                duration = math.max(0.5, sz / 24000)
+            else
+                duration = math.max(0.5, sz / 48000)
+            end
+        else
+            duration = 1.0
+        end
+    end
+
+    local actual_play_time = math.max(0.2, duration / speed)
+
+    local now = (UIManager.getTime and UIManager:getTime()) or os.time()
+    self._play_end_time = now + actual_play_time
+    self._remaining_play_time = actual_play_time
+    self._on_finished_cb = on_finished
+
+    -- Schedule completion callback
+    local this = self
+
+    -- On Android: Actively poll isPlaybackDone() for instantaneous zero-gap transition!
+    if self.driver_name == "android" and self._android_player and driver_dispatched then
+        local function check_done()
+            if this._current_token ~= session_token or not this._is_playing or this._is_paused then
+                return
+            end
+            local is_done = this._android_player:isPlaybackDone()
+            if is_done then
+                logger.warn("AudioBackend: check_done true! duration=", duration, "calling on_finished")
+                this._is_playing = false
+                this._is_paused = false
+                this._active_poll_timer = nil
+                if this._active_timer and UIManager.unschedule then
+                    UIManager:unschedule(this._active_timer)
+                    this._active_timer = nil
+                end
+                if on_finished then
+                    pcall(on_finished, true)
+                end
+                return
+            end
+            this._active_poll_timer = UIManager:scheduleIn(0.04, check_done)
+        end
+
+        -- Start polling nearing end of playback (0.2s before estimated end)
+        local poll_start = math.max(0.05, actual_play_time - 0.2)
+        this._active_poll_timer = UIManager:scheduleIn(poll_start, check_done)
+
+        -- Completion timer based on exact audio duration
+        self._active_timer = UIManager:scheduleIn(actual_play_time, function()
+            if this._current_token == session_token and this._is_playing and not this._is_paused then
+                this._is_playing = false
+                this._is_paused = false
+                this._active_timer = nil
+                if this._active_poll_timer and UIManager.unschedule then
+                    UIManager:unschedule(this._active_poll_timer)
+                    this._active_poll_timer = nil
+                end
+                if on_finished then
+                    pcall(on_finished, true)
+                end
+            end
+        end)
+    else
+        self._active_timer = UIManager:scheduleIn(actual_play_time, function()
+            if this._current_token == session_token and this._is_playing and not this._is_paused then
+                this._is_playing = false
+                this._is_paused = false
+                this._active_timer = nil
+                if on_finished then
+                    pcall(on_finished, true)
+                end
+            end
+        end)
+    end
 
     return true
 end

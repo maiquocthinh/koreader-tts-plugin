@@ -55,12 +55,16 @@ function PlaybackQueue:new(opts)
     instance.on_page_turn = opts.on_page_turn
     instance.on_finished = opts.on_finished
     instance.on_error = opts.on_error
+    instance.on_buffer_change = opts.on_buffer_change
 
     -- FSM state
     instance.state = PlaybackQueue.STATE_IDLE
 
     -- Generation token to prevent race conditions on seeking or stopping
     instance.queue_generation = 0
+
+    -- Active background fetch slot offset (ensures strictly 1 in-flight network request)
+    instance._active_fetch_offset = nil
 
     -- Current playback position
     instance.current_page = 1
@@ -202,11 +206,15 @@ end
 
 --- Cancel all active fetch tasks in slots
 function PlaybackQueue:_cancelActiveFetches()
+    self._active_fetch_offset = nil
     for i = 0, 7 do
         local slot = self.slots[i]
         if slot and slot.cancel_fn then
             pcall(slot.cancel_fn)
             slot.cancel_fn = nil
+            if slot.status == "FETCHING" then
+                slot.status = "EMPTY"
+            end
         end
     end
 end
@@ -231,7 +239,8 @@ function PlaybackQueue:_createSlotItem(page_num, chunk_index, gen)
 
     -- Check if valid cache file already exists on disk
     if self.tts_client then
-        local cached, cache_path = self.tts_client:hasValidCache(chunk.text, self.tts_client.voice)
+        local format = (self.settings and self.settings:get("audio_format")) or (self.tts_client and self.tts_client.audio_format) or "wav"
+        local cached, cache_path = self.tts_client:hasValidCache(chunk.text, self.tts_client.voice, format)
         if cached then
             item.status = "READY"
             item.wav_path = cache_path
@@ -254,9 +263,11 @@ function PlaybackQueue:_fetchSlot(offset)
     end
 
     slot.status = "FETCHING"
+    self._active_fetch_offset = offset
     local expected_gen = self.queue_generation
     local this = self
 
+    local format = (self.settings and self.settings:get("audio_format")) or (self.tts_client and self.tts_client.audio_format) or "wav"
     slot.cancel_fn = self.tts_client:fetchSpeechAsync(slot.chunk.text, function(success, result)
         -- Invalidate if queue generation has changed
         if this.queue_generation ~= expected_gen then
@@ -273,19 +284,40 @@ function PlaybackQueue:_fetchSlot(offset)
         end
 
         if not slot_current_offset then
+            if this._active_fetch_offset == offset then
+                this._active_fetch_offset = nil
+            end
+            this:_pumpPrefetchQueue()
             return
         end
 
         slot.cancel_fn = nil
+        if this._active_fetch_offset == slot_current_offset or this._active_fetch_offset == offset then
+            this._active_fetch_offset = nil
+        end
 
         if success then
             slot.status = "READY"
             slot.wav_path = result
 
-            -- If this slot is now Slot 0 and FSM is awaiting PREFETCHING, trigger playback immediately
-            if slot_current_offset == 0 and this.state == PlaybackQueue.STATE_PREFETCHING then
-                this:_playSlot(0)
+            -- Check if prefetch buffer has enough cushion to begin playback from PREFETCHING state
+            if this.state == PlaybackQueue.STATE_PREFETCHING then
+                local k = (this.settings and this.settings:get("preload_count")) or 2
+                local need_cushion = (k >= 2 and this.slots[1] ~= nil)
+                local cushion_ready = (not need_cushion) or (this.slots[1] and this.slots[1].status == "READY")
+
+                if this.slots[0] and this.slots[0].status == "READY" and cushion_ready then
+                    this:_playSlot(0)
+                end
             end
+
+            -- Notify buffer status update
+            if this.on_buffer_change then
+                pcall(this.on_buffer_change)
+            end
+
+            -- Continue next sequential prefetch in queue
+            this:_pumpPrefetchQueue()
         else
             -- Network error classification and resilience handling (Task 6.3)
             local err_str = tostring(result or "")
@@ -299,6 +331,8 @@ function PlaybackQueue:_fetchSlot(offset)
                         pcall(this.on_error, _("Bỏ qua câu bị lỗi máy chủ..."))
                     end
                     this:nextChunk()
+                else
+                    this:_pumpPrefetchQueue()
                 end
             else
                 -- Temporary network issue: retry up to 3 times with backoff
@@ -307,7 +341,7 @@ function PlaybackQueue:_fetchSlot(offset)
                     UIManager:scheduleIn(1.5, function()
                         if this.queue_generation == expected_gen and slot.status == "FETCHING" then
                             slot.status = "EMPTY"
-                            this:_fetchSlot(slot_current_offset)
+                            this:_pumpPrefetchQueue()
                         end
                     end)
                 else
@@ -317,11 +351,57 @@ function PlaybackQueue:_fetchSlot(offset)
                         if this.on_error then
                             pcall(this.on_error, _("⚠️ Mất mạng. Đang tạm dừng phát, vui lòng kiểm tra kết nối."))
                         end
+                    else
+                        this:_pumpPrefetchQueue()
                     end
                 end
             end
         end
-    end)
+    end, { format = format, response_format = format })
+end
+
+--- Prioritized Sequential Prefetch Worker
+-- Ensures strictly 1 network fetch runs at any time, prioritizing Slot 0, then Slot 1..k in order.
+function PlaybackQueue:_pumpPrefetchQueue()
+    if self.state == PlaybackQueue.STATE_IDLE then
+        return
+    end
+
+    local k = (self.settings and self.settings:get("preload_count")) or 2
+    k = math.max(1, math.min(7, k))
+
+    -- 1. Slot 0 priority: If Slot 0 is EMPTY, it must be fetched first!
+    if self.slots[0] and self.slots[0].status == "EMPTY" then
+        -- If a background prefetch is running, cancel it to prioritize Slot 0 immediately
+        if self._active_fetch_offset and self._active_fetch_offset ~= 0 then
+            local active_slot = self.slots[self._active_fetch_offset]
+            if active_slot and active_slot.cancel_fn then
+                pcall(active_slot.cancel_fn)
+                active_slot.cancel_fn = nil
+                active_slot.status = "EMPTY"
+            end
+            self._active_fetch_offset = nil
+        end
+
+        if not self._active_fetch_offset then
+            self:_fetchSlot(0)
+        end
+        return
+    end
+
+    -- 2. If a fetch is already in flight, let it complete
+    if self._active_fetch_offset ~= nil then
+        return
+    end
+
+    -- 3. Sequentially find the lowest unready slot from 1 to k
+    for offset = 1, k do
+        local slot = self.slots[offset]
+        if slot and slot.status == "EMPTY" then
+            self:_fetchSlot(offset)
+            return
+        end
+    end
 end
 
 --- Ensure all slots (Slot 0 + up to K preload slots) are populated and preloading
@@ -360,12 +440,8 @@ function PlaybackQueue:_ensureWindow()
         end
     end
 
-    -- Trigger fetches for unready slots
-    for offset = 0, k do
-        if self.slots[offset] and self.slots[offset].status == "EMPTY" then
-            self:_fetchSlot(offset)
-        end
-    end
+    -- Start prioritized sequential prefetching (strictly 1 connection at a time)
+    self:_pumpPrefetchQueue()
 end
 
 --- Play audio at Slot N (offset 0)
@@ -380,7 +456,7 @@ function PlaybackQueue:_playSlot(offset)
 
     if slot.status ~= "READY" or not slot.wav_path then
         self:_setState(PlaybackQueue.STATE_PREFETCHING)
-        self:_fetchSlot(offset)
+        self:_pumpPrefetchQueue()
         return
     end
 
@@ -390,33 +466,11 @@ function PlaybackQueue:_playSlot(offset)
     self.current_page = slot.page
     self.current_index = slot.chunk_index
 
-    -- Save reading session progress to Settings (Task 6.2)
-    if self.settings and self.document then
-        local book_id = nil
-        if type(self.document.getMD5) == "function" then
-            local ok, md5 = pcall(self.document.getMD5, self.document)
-            if ok and md5 and md5 ~= "" then book_id = tostring(md5) end
-        end
-        if not book_id then
-            book_id = self.document.file or self.document.path or "current_book"
-        end
-        self.settings:set("last_book_id", tostring(book_id))
-        self.settings:set("last_page", slot.page)
-        self.settings:set("last_chunk_index", slot.chunk_index)
-        self.settings:save()
-    end
-
-    -- Notify chunk change for UI update & sentence highlighting
-    local chunks_on_page = self:_getPageChunks(self.current_page)
-    if self.on_chunk_change then
-        pcall(self.on_chunk_change, slot.chunk, self.current_page, self.current_index, #chunks_on_page)
-    end
-
+    -- CRITICAL: Trigger audio playback immediately so native player starts with 0ms delay!
+    local speed = self.settings and self.settings:get("speed") or 1.0
     local expected_gen = self.queue_generation
     local this = self
 
-    -- Trigger audio playback
-    local speed = self.settings and self.settings:get("speed") or 1.0
     self.audio_backend:play(slot.wav_path, function(finished)
         -- Ignore callback if queue generation has changed
         if this.queue_generation ~= expected_gen then
@@ -427,6 +481,30 @@ function PlaybackQueue:_playSlot(offset)
             this:_advanceWindow()
         end
     end, { speed = speed })
+
+    -- In background while audio plays: Cache book ID (avoid recalculating MD5 on every sentence)
+    if not self._book_id and self.document then
+        local book_id = nil
+        if type(self.document.getMD5) == "function" then
+            local ok, md5 = pcall(self.document.getMD5, self.document)
+            if ok and md5 and md5 ~= "" then book_id = tostring(md5) end
+        end
+        self._book_id = book_id or self.document.file or self.document.path or "current_book"
+    end
+    if self.settings and self._book_id then
+        self.settings:set("last_book_id", tostring(self._book_id))
+        self.settings:set("last_page", slot.page)
+        self.settings:set("last_chunk_index", slot.chunk_index)
+    end
+
+    -- Notify chunk change for UI update & sentence highlighting (rendered concurrently with audio)
+    local chunks_on_page = self:_getPageChunks(self.current_page)
+    if self.on_chunk_change then
+        pcall(self.on_chunk_change, slot.chunk, self.current_page, self.current_index, #chunks_on_page)
+    end
+
+    -- Keep background prefetch worker running during playback
+    self:_pumpPrefetchQueue()
 end
 
 --- Advance Sliding Window when sentence N finishes (Zero-gap transition)
@@ -455,30 +533,45 @@ function PlaybackQueue:_advanceWindow()
     self.current_page = self.slots[0].page
     self.current_index = self.slots[0].chunk_index
 
-    -- Auto turn page when advancing to a new page
-    if new_page ~= old_page then
-        self:_turnPage(new_page)
+    -- ZERO-GAP CRITICAL PATH:
+    -- Dispatch audio for new Slot 0 IMMEDIATELY upon shifting, before any tail loading or page layout!
+    local slot_ready = (self.slots[0] and self.slots[0].status == "READY")
+    if slot_ready then
+        self:_playSlot(0)
+    elseif self.slots[0] and self.slots[0].status == "ERROR_SKIP" then
+        self:_advanceWindow()
+        return
+    else
+        self:_setState(PlaybackQueue.STATE_PREFETCHING)
+        self:_pumpPrefetchQueue()
     end
 
-    -- Populate the new tail slot (Slot k)
+    -- Background housekeeping while audio is already playing:
+    -- 1. If an active background fetch was in flight on slot i > 0, adjust its tracked offset
+    if self._active_fetch_offset then
+        if self._active_fetch_offset > 0 then
+            self._active_fetch_offset = self._active_fetch_offset - 1
+        else
+            self._active_fetch_offset = nil
+        end
+    end
+
+    -- 2. Populate the new tail slot (Slot k)
     if self.slots[k - 1] then
         local pk, ik = self:_getNextPosition(self.slots[k - 1].page, self.slots[k - 1].chunk_index)
         if pk and ik then
             self.slots[k] = self:_createSlotItem(pk, ik, self.queue_generation)
-            if self.slots[k] and self.slots[k].status == "EMPTY" then
-                self:_fetchSlot(k)
-            end
         end
     end
 
-    -- ZERO-GAP: Play Slot 0 immediately if READY, or skip if ERROR_SKIP
-    if self.slots[0].status == "READY" then
-        self:_playSlot(0)
-    elseif self.slots[0].status == "ERROR_SKIP" then
-        self:_advanceWindow()
-    else
-        self:_setState(PlaybackQueue.STATE_PREFETCHING)
-        self:_fetchSlot(0)
+    -- 3. Notify buffer update for UI indicator
+    if self.on_buffer_change then
+        pcall(self.on_buffer_change)
+    end
+
+    -- 4. Auto turn page when advancing to a new page
+    if new_page ~= old_page then
+        self:_turnPage(new_page)
     end
 end
 
@@ -585,7 +678,7 @@ function PlaybackQueue:stop()
         self.settings:save()
     end
 
-    self.slots = { [0] = nil, [1] = nil, [2] = nil }
+    self.slots = {}
     self:_setState(PlaybackQueue.STATE_IDLE)
 end
 
@@ -627,22 +720,26 @@ function PlaybackQueue:seekChunk(page_num, chunk_index)
     -- 4. Set new target position
     self.current_page = page_num
     self.current_index = chunk_index
-    self.slots = { [0] = nil, [1] = nil, [2] = nil }
+    self.slots = {}
 
     -- Turn page on ReaderUI if page changed
     if old_page and old_page ~= page_num then
         self:_turnPage(page_num)
     end
 
-    -- 5. Rebuild 3-slot window
+    -- 5. Rebuild sliding window & start sequential prefetch
     self:_ensureWindow()
 
-    -- 6. If Slot 0 is ready, play immediately; otherwise start prefetching
-    if self.slots[0] and self.slots[0].status == "READY" then
+    -- 6. If Slot 0 is ready and cushion is satisfied, play immediately; otherwise state is PREFETCHING
+    local k = (self.settings and self.settings:get("preload_count")) or 2
+    local need_cushion = (k >= 2 and self.slots[1] ~= nil)
+    local cushion_ready = (not need_cushion) or (self.slots[1] and self.slots[1].status == "READY")
+
+    if self.slots[0] and self.slots[0].status == "READY" and cushion_ready then
         self:_playSlot(0)
     else
         self:_setState(PlaybackQueue.STATE_PREFETCHING)
-        self:_fetchSlot(0)
+        self:_pumpPrefetchQueue()
     end
 end
 

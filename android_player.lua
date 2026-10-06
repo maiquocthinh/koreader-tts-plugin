@@ -225,14 +225,6 @@ function AndroidPlayer:_releasePlayer()
     android.jni:context(android.app.activity.vm, function(jni)
         local env = jni.env
         pcall(function()
-            if self._method.pause then
-                env[0].CallVoidMethod(env, mp, self._method.pause)
-                checkException(env)
-            end
-            if self._method.stop then
-                env[0].CallVoidMethod(env, mp, self._method.stop)
-                checkException(env)
-            end
             if self._method.reset then
                 env[0].CallVoidMethod(env, mp, self._method.reset)
                 checkException(env)
@@ -661,12 +653,9 @@ function AndroidPlayer:isPlaying()
     return self._playing and true or false
 end
 
--- After wall-clock hits MediaPlayer duration, wait this long before telling
--- the playlist to advance.  The next-track path stop()s MediaPlayer immediately;
--- on Boox (and BT/AirPods) the HAL still holds the last ~word or two.  Completing
--- 400 ms *early* used to clip those words; draining 400 ms *after* duration
--- lets them play, at the cost of a short gap between Storyteller parts.
-local EOS_DRAIN_MS = 400
+-- After wall-clock hits MediaPlayer duration, drain a tiny margin (30ms)
+-- before signaling completion to achieve true zero-gap sentence transitions.
+local EOS_DRAIN_MS = 30
 
 function AndroidPlayer:isPlaybackDone()
     if not self._mp_ref then return true end
