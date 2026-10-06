@@ -124,6 +124,12 @@ run_test("Reject invalid types or unallowed enum values", function()
     ok, err = s:set("highlight_mode", "rainbow")
     assert(ok == false, "Must reject unknown highlight_mode")
 
+    -- audio_format validation
+    ok, err = s:set("audio_format", "invalid_format")
+    assert(ok == false, "Must reject unknown audio_format")
+    ok, err = s:set("audio_format", "flac")
+    assert(ok == true and s:get("audio_format") == "flac", "Must accept valid flac format")
+
     -- Non-existent key
     ok, err = s:set("non_existent_key", 123)
     assert(ok == false, "Must reject unknown schema key")

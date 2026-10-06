@@ -734,7 +734,14 @@ function UIPlayer:_updateBufferStatus()
     end
 
     local dots = string.rep("●", ready_count) .. string.rep("○", k - ready_count)
-    local status_text = string.format(_("Đệm: %s (%d câu)"), dots, ready_count)
+    local status_suffix = ""
+    if self.playback_queue and self.playback_queue._active_fetch_offset ~= nil then
+        status_suffix = " ⏳"
+    elseif self.tts_client and self.tts_client.last_latency_ms and self.tts_client.last_latency_ms > 0 then
+        local sec = self.tts_client.last_latency_ms / 1000
+        status_suffix = string.format(" (%.1fs)", sec)
+    end
+    local status_text = string.format(_("Đệm: %s%s"), dots, status_suffix)
 
     if self.buffer_status_widget.setText then
         self.buffer_status_widget:setText(status_text)
@@ -781,6 +788,14 @@ end
 function UIPlayer:onStateChange(old_state, new_state)
     self:_updatePlayPauseIcon()
     self:_updateBufferStatus()
+end
+
+--- Event callback when background prefetch buffer updates
+function UIPlayer:onBufferChange()
+    self:_updateBufferStatus()
+    if self.control_bar and UIManager and UIManager.setDirty then
+        pcall(UIManager.setDirty, UIManager, self.control_bar, "ui")
+    end
 end
 
 --- Event callback when page turns

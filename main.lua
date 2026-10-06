@@ -46,6 +46,7 @@ function KoreaderTTS:init()
     self.tts_client = TTSClient:new{
         server_url = self.settings:get("server_url"),
         voice = self.settings:get("voice"),
+        audio_format = self.settings:get("audio_format"),
         api_key = self.settings:get("api_key"),
         request_timeout = self.settings:get("request_timeout"),
     }
@@ -81,6 +82,11 @@ function KoreaderTTS:init()
         on_state_change = function(old_state, new_state)
             if this.ui_player then
                 this.ui_player:onStateChange(old_state, new_state)
+            end
+        end,
+        on_buffer_change = function()
+            if this.ui_player and this.ui_player.onBufferChange then
+                this.ui_player:onBufferChange()
             end
         end,
         on_page_turn = function(new_page)
@@ -449,6 +455,7 @@ function KoreaderTTS:onTestSingleSentence()
     -- Sync latest configuration from settings
     self.tts_client.server_url = self.settings:get("server_url")
     self.tts_client.voice = self.settings:get("voice")
+    self.tts_client.audio_format = self.settings:get("audio_format") or "wav"
     self.tts_client.api_key = self.settings:get("api_key")
     self.tts_client.timeout = self.settings:get("request_timeout")
     self.audio_backend:setSpeed(self.settings:get("speed"))
@@ -474,8 +481,13 @@ function KoreaderTTS:onTestSingleSentence()
         end)
 
         local driver = this.audio_backend._active_process or this.audio_backend.driver_name or "timer"
+        local lat_ms = (this.tts_client and this.tts_client.last_latency_ms) or 0
+        local ping_info = string.format("%.2fs", lat_ms / 1000)
+        local health = "Tốt ⚡"
+        if lat_ms > 4000 then health = "Chậm ⚠️"
+        elseif lat_ms > 2000 then health = "Bình thường" end
         UIManager:show(InfoMessage:new{
-            text = string.format(_("Đang phát câu thử nghiệm... [%s]\n'%s'"), tostring(driver), test_text),
+            text = string.format(_("Đang phát câu thử nghiệm... [%s · Tốc độ API: %s (%s)]\n'%s'"), tostring(driver), ping_info, health, test_text),
             timeout = 3,
         })
     end)
@@ -490,6 +502,7 @@ function KoreaderTTS:onStartTTS()
     if self.tts_client then
         self.tts_client.server_url = self.settings:get("server_url")
         self.tts_client.voice = self.settings:get("voice")
+        self.tts_client.audio_format = self.settings:get("audio_format") or "wav"
         self.tts_client.api_key = self.settings:get("api_key")
         self.tts_client.timeout = self.settings:get("request_timeout")
     end
@@ -935,6 +948,61 @@ function KoreaderTTS:showSettingsDialog()
 
     local openSpeedInput
     local openPreloadCountDialog
+    local openAudioFormatDialog
+
+    openAudioFormatDialog = function()
+        local format_dialog
+        local current_fmt = this.settings:get("audio_format") or "wav"
+
+        local format_options = {
+            { id = "wav",  title = _("WAV (Mặc định - Chuẩn PCM, 0% CPU giải mã)") },
+            { id = "flac", title = _("FLAC (Lossless - Tiết kiệm 70% dung lượng, nguyên gốc)") },
+            { id = "mp3",  title = _("MP3 (Phổ biến - Siêu nhẹ, nén 90%)") },
+            { id = "opus", title = _("OPUS (Tối ưu - Siêu nhẹ, tải nhanh nhất)") },
+        }
+
+        local buttons = {}
+        for _, opt in ipairs(format_options) do
+            local is_selected = (opt.id == current_fmt)
+            local prefix = is_selected and "● " or "○ "
+            table.insert(buttons, {
+                {
+                    text = prefix .. opt.title,
+                    align = "left",
+                    callback = function()
+                        this.settings:set("audio_format", opt.id)
+                        this.settings:save()
+                        if this.tts_client then
+                            this.tts_client.audio_format = opt.id
+                        end
+                        UIManager:close(format_dialog)
+                        UIManager:nextTick(function()
+                            if openServerAndVoiceDialog then openServerAndVoiceDialog() end
+                        end)
+                    end,
+                }
+            })
+        end
+
+        table.insert(buttons, {
+            {
+                text = _("Hủy"),
+                id = "cancel",
+                callback = function()
+                    UIManager:close(format_dialog)
+                    UIManager:nextTick(function()
+                        if openServerAndVoiceDialog then openServerAndVoiceDialog() end
+                    end)
+                end,
+            }
+        })
+
+        format_dialog = ButtonDialog:new{
+            title = _("Chọn Định dạng Âm thanh (Audio Format)"),
+            buttons = buttons,
+        }
+        UIManager:show(format_dialog)
+    end
 
     openServerAndVoiceDialog = function()
         local sv_dialog
@@ -942,6 +1010,7 @@ function KoreaderTTS:showSettingsDialog()
         local current_voice = this.settings:get("voice") or ""
         local current_speed = this.settings:get("speed") or 1.0
         local current_preload = this.settings:get("preload_count") or 2
+        local current_format = this.settings:get("audio_format") or "wav"
 
         local sv_buttons = {
             {
@@ -986,7 +1055,17 @@ function KoreaderTTS:showSettingsDialog()
             },
             {
                 {
-                    text = _("5. Phát thử âm thanh (Test Audio & API)"),
+                    text = string.format(_("5. Định dạng âm thanh: %s"), (current_format or "wav"):upper()),
+                    align = "left",
+                    callback = function()
+                        UIManager:close(sv_dialog)
+                        UIManager:nextTick(openAudioFormatDialog)
+                    end,
+                },
+            },
+            {
+                {
+                    text = _("6. Phát thử âm thanh (Test Audio & API)"),
                     align = "left",
                     callback = function()
                         this:onTestSingleSentence()

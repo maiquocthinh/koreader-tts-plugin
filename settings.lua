@@ -19,6 +19,7 @@ local DEFAULT_SETTINGS = {
     voice               = "vi-VN-NamMinh",             -- Voice identifier
     speed               = 1.0,                         -- Playback speed (0.5 - 2.0)
     audio_backend       = "auto",                      -- "auto" | "android" | "mpv" | "aplay"
+    audio_format        = "wav",                       -- "wav" | "flac" | "mp3" | "opus"
 
     -- 3. Chunking & Buffer
     chunk_mode          = "sentence",                  -- "sentence"
@@ -157,6 +158,11 @@ function Settings:set(key, value)
     elseif key == "voice" then
         if type(value) ~= "string" or value == "" then
             return false, "Voice cannot be empty"
+        end
+    elseif key == "audio_format" then
+        local allowed = { wav = true, flac = true, mp3 = true, opus = true }
+        if not allowed[value] then
+            return false, "Invalid audio_format: " .. tostring(value)
         end
     end
 
