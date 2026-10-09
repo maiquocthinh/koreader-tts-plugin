@@ -22,6 +22,7 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local Settings = require("settings")
 local TextChunker = require("text_chunker")
 local TTSClient = require("tts_client")
+local TTSService = require("tts_service")
 local AudioBackend = require("audio_backend")
 local PlaybackQueue = require("playback_queue")
 local UIPlayer = require("ui_player")
@@ -50,6 +51,17 @@ function KoreaderTTS:init()
         api_key = self.settings:get("api_key"),
         request_timeout = self.settings:get("request_timeout"),
     }
+    self.tts_service = TTSService:new{
+        server_url = self.settings:get("server_url"),
+        voice = self.settings:get("voice"),
+        audio_format = self.settings:get("audio_format"),
+        speed = self.settings:get("speed"),
+        api_key = self.settings:get("api_key"),
+        cache_dir = "cache/tts",
+        preload_count = self.settings:get("preload_count") or 3,
+        plugin_dir = plugin_path,
+    }
+
     self.audio_backend = AudioBackend:new{
         backend_type = self.settings:get("audio_backend"),
         speed = self.settings:get("speed"),
@@ -69,6 +81,7 @@ function KoreaderTTS:init()
         document = self.ui and self.ui.document,
         chunker = chunker,
         tts_client = self.tts_client,
+        tts_service = self.tts_service,
         audio_backend = self.audio_backend,
         settings = self.settings,
         on_chunk_change = function(chunk, page, index, total)
@@ -1258,10 +1271,16 @@ end
 --- Handle reader close / document close: ensure TTS stops cleanly
 function KoreaderTTS:onCloseDocument()
     self:onStopTTS()
+    if self.tts_service then
+        pcall(function() self.tts_service:destroy() end)
+    end
 end
 
 function KoreaderTTS:onCloseWidget()
     self:onStopTTS()
+    if self.tts_service then
+        pcall(function() self.tts_service:destroy() end)
+    end
 end
 
 --- Handle device suspend / screen turn-off: pause playback cleanly
@@ -1274,6 +1293,9 @@ end
 --- Handle KOReader exit: stop all playback
 function KoreaderTTS:onExit()
     self:onStopTTS()
+    if self.tts_service then
+        pcall(function() self.tts_service:destroy() end)
+    end
 end
 
 return KoreaderTTS

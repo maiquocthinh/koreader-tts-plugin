@@ -6,8 +6,17 @@
 use std::ffi::{c_char, CStr};
 use std::panic::catch_unwind;
 use std::ptr;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use crate::audio_decoder::AudioDecoder;
+use crate::audio_sink::{AudioPlayCursor, AudioSink, SINK_STATE_PLAYING};
+use crate::cache_manager::CacheManager;
+use crate::event_ring_buffer::{create_event_channel, EventConsumer, EventProducer};
+use crate::http_client::{HttpClient, HttpClientConfig, SpeechRequest};
+use crate::prefetch_queue::PrefetchQueue;
 
 // ============================================================================
 // C-ABI Error Codes & Enums
@@ -105,29 +114,340 @@ pub struct TtsCoreSlotStatus {
 }
 
 // ============================================================================
-// Internal Engine & Opaque Context Handle
+// Internal Configuration & Core Engine
 // ============================================================================
 
-const STATE_IDLE: u8 = 0;
-const STATE_PLAYING: u8 = 1;
-const STATE_PAUSED: u8 = 2;
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct CoreConfig {
+    #[serde(default = "default_server_url")]
+    pub server_url: String,
+    #[serde(default = "default_voice")]
+    pub voice: String,
+    #[serde(default = "default_format")]
+    pub audio_format: String,
+    #[serde(default = "default_speed")]
+    pub speed: f64,
+    pub api_key: Option<String>,
+    #[serde(default = "default_cache_dir")]
+    pub cache_dir: String,
+    #[serde(default = "default_preload_count")]
+    pub preload_count: usize,
+}
 
-/// Internal engine state managed behind the opaque pointer.
+fn default_server_url() -> String {
+    "http://127.0.0.1:8000/v1/audio/speech".to_string()
+}
+fn default_voice() -> String {
+    "duc_tri".to_string()
+}
+fn default_format() -> String {
+    "wav".to_string()
+}
+fn default_speed() -> f64 {
+    1.0
+}
+fn default_cache_dir() -> String {
+    std::env::temp_dir()
+        .join("koreader_tts_cache")
+        .to_string_lossy()
+        .to_string()
+}
+fn default_preload_count() -> usize {
+    3
+}
+
+impl Default for CoreConfig {
+    fn default() -> Self {
+        Self {
+            server_url: default_server_url(),
+            voice: default_voice(),
+            audio_format: default_format(),
+            speed: default_speed(),
+            api_key: None,
+            cache_dir: default_cache_dir(),
+            preload_count: default_preload_count(),
+        }
+    }
+}
+
+/// Internal engine orchestrating networking, caching, decoding, and playback.
 pub struct TtsCoreEngine {
-    pub config_json: String,
-    pub state: Arc<AtomicU8>,
-    pub current_generation: u32,
-    pub current_chunk: u32,
+    pub config: Arc<Mutex<CoreConfig>>,
+    pub http_client: Arc<HttpClient>,
+    pub cache_manager: Arc<CacheManager>,
+    pub prefetch_queue: Arc<Mutex<PrefetchQueue>>,
+    pub audio_sink: Arc<AudioSink>,
+    pub event_consumer: Arc<Mutex<EventConsumer>>,
+    pub event_producer: Arc<Mutex<EventProducer>>,
+    pub is_running: Arc<AtomicBool>,
+    pub worker_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl TtsCoreEngine {
-    pub fn new(config_json: String) -> Self {
-        Self {
-            config_json,
-            state: Arc::new(AtomicU8::new(STATE_IDLE)),
-            current_generation: 0,
-            current_chunk: 0,
-        }
+    pub fn new(config_json: &str) -> Result<Self, String> {
+        let parsed_config: CoreConfig = if config_json.trim().is_empty() {
+            CoreConfig::default()
+        } else {
+            serde_json::from_str(config_json).map_err(|e| format!("Invalid config JSON: {}", e))?
+        };
+
+        let config = Arc::new(Mutex::new(parsed_config.clone()));
+
+        let http_cfg = HttpClientConfig {
+            server_url: parsed_config.server_url.clone(),
+            api_key: parsed_config.api_key.clone(),
+            timeout_secs: 15,
+            connect_timeout_secs: 5,
+            pool_max_idle_per_host: 5,
+            tcp_keepalive_secs: 60,
+        };
+
+        let http_client = Arc::new(
+            HttpClient::new(http_cfg).map_err(|e| format!("HTTP client init failed: {}", e))?,
+        );
+
+        let cache_manager = Arc::new(
+            CacheManager::new(&parsed_config.cache_dir, 50 * 1024 * 1024, 4)
+                .map_err(|e| format!("CacheManager init failed: {}", e))?,
+        );
+
+        let prefetch_queue = Arc::new(Mutex::new(PrefetchQueue::new(parsed_config.preload_count)));
+
+        let (prod, cons) = create_event_channel(Some(128));
+        let event_producer = Arc::new(Mutex::new(prod));
+        let event_consumer = Arc::new(Mutex::new(cons));
+
+        // Create AudioSink with cloned EventProducer
+        let (sink_prod, mut sink_cons) = create_event_channel(Some(64));
+        let audio_sink = Arc::new(AudioSink::new(sink_prod));
+
+        // Forward sink events into main event_producer
+        let main_prod_for_sink = event_producer.clone();
+        let is_running = Arc::new(AtomicBool::new(true));
+        let is_running_clone = is_running.clone();
+
+        // Background worker thread: runs pump loop
+        let q_clone = prefetch_queue.clone();
+        let c_clone = cache_manager.clone();
+        let h_clone = http_client.clone();
+        let cfg_clone = config.clone();
+        let prod_clone = event_producer.clone();
+        let sink_clone = audio_sink.clone();
+
+        let worker_handle = thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::error!("Failed to create tokio runtime: {:?}", e);
+                    return;
+                }
+            };
+
+            while is_running_clone.load(Ordering::SeqCst) {
+                // 1. Forward events from sink to main event channel
+                while let Some(evt) = sink_cons.pop() {
+                    if let Ok(mut main_prod) = main_prod_for_sink.lock() {
+                        main_prod.push(evt);
+                    }
+                }
+
+                // 2. Feed audio into sink if sink is playing and has room
+                {
+                    let q = q_clone.lock().unwrap();
+                    let playing_idx = q.current_playing_index;
+                    let current_chunk_audio = q.get_chunk_audio(playing_idx);
+
+                    if let Some(buf) = current_chunk_audio {
+                        if sink_clone.state() == SINK_STATE_PLAYING {
+                            let mut renderer = sink_clone.renderer.lock().unwrap();
+                            if renderer.current_chunk.is_none() {
+                                let total = q.current_slots.len() as u32;
+                                let gen = q.current_generation;
+                                renderer.set_current(AudioPlayCursor::new(
+                                    gen,
+                                    playing_idx as u32,
+                                    total,
+                                    buf,
+                                ));
+                            }
+
+                            // If next chunk is ready and not queued in sink, queue it!
+                            if renderer.next_chunk.is_none() {
+                                if let Some(next_buf) = q.get_chunk_audio(playing_idx + 1) {
+                                    let total = q.current_slots.len() as u32;
+                                    let gen = q.current_generation;
+                                    renderer.enqueue_next(AudioPlayCursor::new(
+                                        gen,
+                                        (playing_idx + 1) as u32,
+                                        total,
+                                        next_buf,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. Inspect next prefetch target
+                let target_opt = {
+                    let q = q_clone.lock().unwrap();
+                    q.get_next_fetch_target()
+                };
+
+                if let Some(target) = target_opt {
+                    let (voice, format, speed, server_url) = {
+                        let conf = cfg_clone.lock().unwrap();
+                        (
+                            conf.voice.clone(),
+                            conf.audio_format.clone(),
+                            conf.speed,
+                            conf.server_url.clone(),
+                        )
+                    };
+
+                    let cache_key = CacheManager::compute_cache_key(
+                        &target.text,
+                        &voice,
+                        &format,
+                        speed,
+                        &server_url,
+                    );
+
+                    // Step A: Check L1 Memory Cache
+                    if let Some(mem_buf) = c_clone.get_memory(&cache_key) {
+                        let mut q = q_clone.lock().unwrap();
+                        q.set_chunk_ready(
+                            target.generation,
+                            target.is_next_page,
+                            target.chunk_index,
+                            mem_buf,
+                        );
+                        continue;
+                    }
+
+                    // Step B: Check L2 Disk Cache
+                    if let Ok(Some(disk_bytes)) = c_clone.get_disk_bytes(&cache_key, &format) {
+                        if let Ok(decoded_buf) =
+                            AudioDecoder::decode_from_memory(disk_bytes, Some(&format))
+                        {
+                            let arc_buf = Arc::new(decoded_buf);
+                            c_clone.put_memory(cache_key.clone(), arc_buf.clone());
+                            let mut q = q_clone.lock().unwrap();
+                            q.set_chunk_ready(
+                                target.generation,
+                                target.is_next_page,
+                                target.chunk_index,
+                                arc_buf,
+                            );
+                            continue;
+                        }
+                    }
+
+                    // Step C: Fetch from Network
+                    {
+                        let mut q = q_clone.lock().unwrap();
+                        q.set_chunk_fetching(
+                            target.generation,
+                            target.is_next_page,
+                            target.chunk_index,
+                        );
+                    }
+
+                    let req = SpeechRequest::new(&target.text, &voice, &format, speed);
+                    let start_time = std::time::Instant::now();
+
+                    let fetch_res = rt.block_on(async { h_clone.fetch_speech(&req, None).await });
+
+                    match fetch_res {
+                        Ok(audio_bytes) => {
+                            let latency_ms = start_time.elapsed().as_millis() as i32;
+                            // Save to disk cache
+                            let _ = c_clone.put_disk_bytes(&cache_key, &format, &audio_bytes);
+
+                            // Decode audio
+                            match AudioDecoder::decode_from_memory(audio_bytes, Some(&format)) {
+                                Ok(decoded) => {
+                                    let arc_buf = Arc::new(decoded);
+                                    c_clone.put_memory(cache_key, arc_buf.clone());
+
+                                    let mut q = q_clone.lock().unwrap();
+                                    q.set_chunk_ready(
+                                        target.generation,
+                                        target.is_next_page,
+                                        target.chunk_index,
+                                        arc_buf,
+                                    );
+
+                                    // Emit latency and buffer updated event
+                                    if let Ok(mut prod) = prod_clone.lock() {
+                                        prod.push(TtsCoreEvent {
+                                            event_type: TtsEventType::LatencyReport as i32,
+                                            generation: target.generation,
+                                            chunk_index: target.chunk_index as u32,
+                                            latency_ms,
+                                            ..Default::default()
+                                        });
+                                        prod.push(TtsCoreEvent {
+                                            event_type: TtsEventType::BufferUpdated as i32,
+                                            generation: target.generation,
+                                            chunk_index: target.chunk_index as u32,
+                                            ..Default::default()
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Audio decode failed: {:?}", e);
+                                    let mut q = q_clone.lock().unwrap();
+                                    q.set_chunk_failed(
+                                        target.generation,
+                                        target.is_next_page,
+                                        target.chunk_index,
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Network fetch failed: {:?}", e);
+                            let mut q = q_clone.lock().unwrap();
+                            q.set_chunk_failed(
+                                target.generation,
+                                target.is_next_page,
+                                target.chunk_index,
+                            );
+
+                            if let Ok(mut prod) = prod_clone.lock() {
+                                let mut evt = TtsCoreEvent {
+                                    event_type: TtsEventType::Error as i32,
+                                    generation: target.generation,
+                                    chunk_index: target.chunk_index as u32,
+                                    ..Default::default()
+                                };
+                                evt.set_error_message(&format!("Network error: {}", e));
+                                prod.push(evt);
+                            }
+                        }
+                    }
+                } else {
+                    // No work to do, brief sleep
+                    thread::sleep(Duration::from_millis(20));
+                }
+            }
+        });
+
+        Ok(Self {
+            config,
+            http_client,
+            cache_manager,
+            prefetch_queue,
+            audio_sink,
+            event_consumer,
+            event_producer,
+            is_running,
+            worker_handle: Some(worker_handle),
+        })
     }
 }
 
@@ -189,15 +509,21 @@ pub unsafe extern "C" fn tts_core_context_create(
 
         crate::init_logging();
 
-        let ctx = Box::new(TtsCoreContext {
-            engine: TtsCoreEngine::new(c_str.to_string()),
-        });
-
-        if !out_error.is_null() {
-            *out_error = TTS_OK;
+        match TtsCoreEngine::new(c_str) {
+            Ok(engine) => {
+                if !out_error.is_null() {
+                    *out_error = TTS_OK;
+                }
+                Box::into_raw(Box::new(TtsCoreContext { engine }))
+            }
+            Err(e) => {
+                log::error!("Engine init error: {}", e);
+                if !out_error.is_null() {
+                    *out_error = TTS_ERR_INVALID_ARG;
+                }
+                ptr::null_mut()
+            }
         }
-
-        Box::into_raw(ctx)
     })
 }
 
@@ -222,9 +548,14 @@ pub unsafe extern "C" fn tts_core_context_update_config(
         };
 
         let context = &mut *ctx;
-        context.engine.config_json = c_str.to_string();
-
-        TTS_OK
+        if let Ok(new_cfg) = serde_json::from_str::<CoreConfig>(c_str) {
+            if let Ok(mut conf) = context.engine.config.lock() {
+                *conf = new_cfg;
+            }
+            TTS_OK
+        } else {
+            TTS_ERR_INVALID_ARG
+        }
     })
 }
 
@@ -246,9 +577,24 @@ pub unsafe extern "C" fn tts_core_queue_load_page(
             return TTS_ERR_INVALID_ARG;
         }
 
+        let mut texts = Vec::with_capacity(chunk_count as usize);
+        for i in 0..chunk_count {
+            let ptr = *chunk_texts.add(i as usize);
+            if ptr.is_null() {
+                return TTS_ERR_INVALID_ARG;
+            }
+            if let Ok(s) = CStr::from_ptr(ptr).to_str() {
+                texts.push(s.to_string());
+            } else {
+                return TTS_ERR_INVALID_ARG;
+            }
+        }
+
         let context = &mut *ctx;
-        context.engine.current_generation = generation;
-        context.engine.current_chunk = 0;
+        {
+            let mut q = context.engine.prefetch_queue.lock().unwrap();
+            q.load_page(generation, texts);
+        }
 
         TTS_OK
     })
@@ -263,13 +609,32 @@ pub unsafe extern "C" fn tts_core_queue_load_page(
 #[no_mangle]
 pub unsafe extern "C" fn tts_core_queue_enqueue_next_page(
     ctx: *mut TtsCoreContext,
-    _generation: u32,
+    generation: u32,
     chunk_texts: *const *const c_char,
     chunk_count: u32,
 ) -> i32 {
     catch_unwind_ffi!(TTS_ERR_PANIC, {
         if ctx.is_null() || chunk_texts.is_null() || chunk_count == 0 {
             return TTS_ERR_INVALID_ARG;
+        }
+
+        let mut texts = Vec::with_capacity(chunk_count as usize);
+        for i in 0..chunk_count {
+            let ptr = *chunk_texts.add(i as usize);
+            if ptr.is_null() {
+                return TTS_ERR_INVALID_ARG;
+            }
+            if let Ok(s) = CStr::from_ptr(ptr).to_str() {
+                texts.push(s.to_string());
+            } else {
+                return TTS_ERR_INVALID_ARG;
+            }
+        }
+
+        let context = &mut *ctx;
+        {
+            let mut q = context.engine.prefetch_queue.lock().unwrap();
+            q.enqueue_next_page(generation, texts);
         }
 
         TTS_OK
@@ -288,7 +653,7 @@ pub unsafe extern "C" fn tts_core_playback_play(ctx: *mut TtsCoreContext) -> i32
         }
 
         let context = &mut *ctx;
-        context.engine.state.store(STATE_PLAYING, Ordering::SeqCst);
+        context.engine.audio_sink.play();
 
         TTS_OK
     })
@@ -306,7 +671,7 @@ pub unsafe extern "C" fn tts_core_playback_pause(ctx: *mut TtsCoreContext) -> i3
         }
 
         let context = &mut *ctx;
-        context.engine.state.store(STATE_PAUSED, Ordering::SeqCst);
+        context.engine.audio_sink.pause();
 
         TTS_OK
     })
@@ -324,7 +689,7 @@ pub unsafe extern "C" fn tts_core_playback_resume(ctx: *mut TtsCoreContext) -> i
         }
 
         let context = &mut *ctx;
-        context.engine.state.store(STATE_PLAYING, Ordering::SeqCst);
+        context.engine.audio_sink.resume();
 
         TTS_OK
     })
@@ -342,7 +707,7 @@ pub unsafe extern "C" fn tts_core_playback_stop(ctx: *mut TtsCoreContext) -> i32
         }
 
         let context = &mut *ctx;
-        context.engine.state.store(STATE_IDLE, Ordering::SeqCst);
+        context.engine.audio_sink.stop();
 
         TTS_OK
     })
@@ -364,8 +729,11 @@ pub unsafe extern "C" fn tts_core_playback_seek(
         }
 
         let context = &mut *ctx;
-        context.engine.current_generation = generation;
-        context.engine.current_chunk = chunk_index;
+        {
+            let mut q = context.engine.prefetch_queue.lock().unwrap();
+            q.seek(generation, chunk_index as usize);
+        }
+        context.engine.audio_sink.stop();
 
         TTS_OK
     })
@@ -386,7 +754,14 @@ pub unsafe extern "C" fn tts_core_event_poll(
             return TTS_ERR_INVALID_ARG;
         }
 
-        // Return 0 (no event available in stub)
+        let context = &mut *ctx;
+        if let Ok(mut cons) = context.engine.event_consumer.lock() {
+            if let Some(evt) = cons.pop() {
+                *out_event = evt;
+                return 1;
+            }
+        }
+
         0
     })
 }
@@ -407,13 +782,9 @@ pub unsafe extern "C" fn tts_core_slot_get_status(
             return TTS_ERR_INVALID_ARG;
         }
 
-        *out_status = TtsCoreSlotStatus {
-            duration_seconds: 0.0,
-            chunk_index,
-            is_cached: 0,
-            is_fetching: 0,
-            is_playing: 0,
-        };
+        let context = &mut *ctx;
+        let q = context.engine.prefetch_queue.lock().unwrap();
+        *out_status = q.get_slot_status(chunk_index as usize);
 
         TTS_OK
     })
@@ -427,7 +798,15 @@ pub unsafe extern "C" fn tts_core_slot_get_status(
 pub unsafe extern "C" fn tts_core_context_destroy(ctx: *mut TtsCoreContext) {
     let _ = catch_unwind(std::panic::AssertUnwindSafe(|| {
         if !ctx.is_null() {
-            drop(Box::from_raw(ctx));
+            let mut boxed = Box::from_raw(ctx);
+            // 1. Signal background worker to stop
+            boxed.engine.is_running.store(false, Ordering::SeqCst);
+            // 2. Stop audio sink
+            boxed.engine.audio_sink.stop();
+            // 3. Join worker thread with timeout
+            if let Some(handle) = boxed.engine.worker_handle.take() {
+                let _ = handle.join();
+            }
         }
     }));
 }

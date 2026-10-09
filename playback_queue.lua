@@ -46,6 +46,7 @@ function PlaybackQueue:new(opts)
     instance.document = opts.document or (opts.ui and opts.ui.document)
     instance.chunker = opts.chunker
     instance.tts_client = opts.tts_client
+    instance.tts_service = opts.tts_service
     instance.audio_backend = opts.audio_backend
     instance.settings = opts.settings
 
@@ -612,6 +613,9 @@ end
 function PlaybackQueue:pause()
     if self.state == PlaybackQueue.STATE_PLAYING or self.state == PlaybackQueue.STATE_PREFETCHING then
         self:_setState(PlaybackQueue.STATE_PAUSED)
+        if self.tts_service and self.tts_service:isNative() then
+            self.tts_service:pause()
+        end
         if self.audio_backend then
             self.audio_backend:pause()
         end
@@ -636,7 +640,10 @@ function PlaybackQueue:resume()
             end
         end)
 
-        if self.audio_backend and self.audio_backend.isPaused and self.audio_backend:isPaused() then
+        if self.tts_service and self.tts_service:isNative() then
+            self:_setState(PlaybackQueue.STATE_PLAYING)
+            self.tts_service:resume()
+        elseif self.audio_backend and self.audio_backend.isPaused and self.audio_backend:isPaused() then
             self:_setState(PlaybackQueue.STATE_PLAYING)
             self.audio_backend:resume()
         else
@@ -660,6 +667,10 @@ end
 function PlaybackQueue:stop()
     self.queue_generation = self.queue_generation + 1
     self:_cancelActiveFetches()
+
+    if self.tts_service and self.tts_service:isNative() then
+        self.tts_service:stop()
+    end
 
     if self.audio_backend then
         self.audio_backend:stop()
