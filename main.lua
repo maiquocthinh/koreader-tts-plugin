@@ -19,13 +19,27 @@ local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local ButtonDialog = require("ui/widget/buttondialog")
-local Settings = require("settings")
-local TextChunker = require("text_chunker")
-local TTSClient = require("tts_client")
-local TTSService = require("tts_service")
-local AudioBackend = require("audio_backend")
-local PlaybackQueue = require("playback_queue")
-local UIPlayer = require("ui_player")
+
+local ok_settings, Settings = pcall(require, "src.service.settings_manager")
+if not ok_settings then Settings = require("settings") end
+
+local ok_chunker, TextChunker = pcall(require, "src.service.document_chunker")
+if not ok_chunker then TextChunker = require("text_chunker") end
+
+local ok_client, TTSClient = pcall(require, "src.bridge.fallback.tts_client")
+if not ok_client then TTSClient = require("tts_client") end
+
+local ok_factory, EngineFactory = pcall(require, "src.engine.engine_factory")
+if not ok_factory then EngineFactory = require("tts_service") end
+
+local ok_audio, AudioBackend = pcall(require, "src.bridge.fallback.audio_backend")
+if not ok_audio then AudioBackend = require("audio_backend") end
+
+local ok_queue, PlaybackQueue = pcall(require, "src.service.reading_coordinator")
+if not ok_queue then PlaybackQueue = require("playback_queue") end
+
+local ok_ui, UIPlayer = pcall(require, "src.ui.player_widget")
+if not ok_ui then UIPlayer = require("ui_player") end
 
 local ok_gettext, _ = pcall(require, "gettext")
 if not ok_gettext or type(_) ~= "function" then
@@ -51,7 +65,7 @@ function KoreaderTTS:init()
         api_key = self.settings:get("api_key"),
         request_timeout = self.settings:get("request_timeout"),
     }
-    self.tts_service = TTSService:new{
+    self.engine = EngineFactory.create{
         server_url = self.settings:get("server_url"),
         voice = self.settings:get("voice"),
         audio_format = self.settings:get("audio_format"),
@@ -61,6 +75,7 @@ function KoreaderTTS:init()
         preload_count = self.settings:get("preload_count") or 3,
         plugin_dir = plugin_path,
     }
+    self.tts_service = self.engine
 
     self.audio_backend = AudioBackend:new{
         backend_type = self.settings:get("audio_backend"),
@@ -81,6 +96,7 @@ function KoreaderTTS:init()
         document = self.ui and self.ui.document,
         chunker = chunker,
         tts_client = self.tts_client,
+        engine = self.engine,
         tts_service = self.tts_service,
         audio_backend = self.audio_backend,
         settings = self.settings,
@@ -1271,14 +1287,18 @@ end
 --- Handle reader close / document close: ensure TTS stops cleanly
 function KoreaderTTS:onCloseDocument()
     self:onStopTTS()
-    if self.tts_service then
+    if self.engine and self.engine.destroy then
+        pcall(function() self.engine:destroy() end)
+    elseif self.tts_service and self.tts_service.destroy then
         pcall(function() self.tts_service:destroy() end)
     end
 end
 
 function KoreaderTTS:onCloseWidget()
     self:onStopTTS()
-    if self.tts_service then
+    if self.engine and self.engine.destroy then
+        pcall(function() self.engine:destroy() end)
+    elseif self.tts_service and self.tts_service.destroy then
         pcall(function() self.tts_service:destroy() end)
     end
 end
@@ -1293,7 +1313,9 @@ end
 --- Handle KOReader exit: stop all playback
 function KoreaderTTS:onExit()
     self:onStopTTS()
-    if self.tts_service then
+    if self.engine and self.engine.destroy then
+        pcall(function() self.engine:destroy() end)
+    elseif self.tts_service and self.tts_service.destroy then
         pcall(function() self.tts_service:destroy() end)
     end
 end

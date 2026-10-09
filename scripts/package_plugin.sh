@@ -37,6 +37,13 @@ for file in "${LUA_FILES[@]}"; do
     fi
 done
 
+echo "=== [2.5/3] Copying Modular Architecture Source Tree (src/) ==="
+if [[ -d "${ROOT_DIR}/src" ]]; then
+    mkdir -p "${DIST_DIR}/src"
+    cp -r "${ROOT_DIR}/src/"* "${DIST_DIR}/src/"
+    echo "  + Bundled src/ modular hierarchy (ui, service, engine, bridge)"
+fi
+
 echo "=== [3/3] Bundling Native Libraries (libs/) ==="
 if [[ -d "${ROOT_DIR}/libs" ]]; then
     mkdir -p "${DIST_DIR}/libs"

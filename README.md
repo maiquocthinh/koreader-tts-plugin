@@ -20,17 +20,32 @@ A high-performance Text-to-Speech (TTS) plugin for [KOReader](https://github.com
 
 ```text
 koreader_tts/
-├── _meta.lua            # Plugin metadata
-├── main.lua             # Entry point & menu integration
-├── settings.lua         # Persistent configuration & pronunciation dictionary
-├── text_chunker.lua     # Text extraction & 3-tier chunking
-├── tts_client.lua       # Non-blocking HTTP client & cache manager
-├── audio_backend.lua    # Multi-platform audio playback adapter
-├── playback_queue.lua   # Sliding window buffer & auto page-turn
-├── ui_player.lua        # Floating control bar, mini bubble & highlighting
-├── sleep_timer.lua      # Sleep timer module
+├── _meta.lua            # Plugin metadata entry point
+├── main.lua             # WidgetContainer entry point & menu integration
+│
+├── [Root Shims - 100% Backward Compatibility]
+├── settings.lua         # Forwarding shim -> src/service/settings_manager
+├── text_chunker.lua     # Forwarding shim -> src/service/document_chunker
+├── playback_queue.lua   # Forwarding shim -> src/service/reading_coordinator
+├── ui_player.lua        # Forwarding shim -> src/ui/player_widget
+├── sleep_timer.lua      # Forwarding shim -> src/service/sleep_timer
+├── tts_service.lua      # Forwarding shim -> src/engine/engine_factory
+├── tts_client.lua       # Forwarding shim -> src/bridge/fallback/tts_client
+├── audio_backend.lua    # Forwarding shim -> src/bridge/fallback/audio_backend
+├── android_player.lua   # Forwarding shim -> src/bridge/fallback/android_player
+│
+├── src/
+│   ├── ui/              # Presentation layer (player_widget, canvas_highlight)
+│   ├── service/         # Application service layer (reading_coordinator, document_chunker, etc.)
+│   ├── engine/          # Engine strategy abstraction (ITtsEngine, NativeEngine, FallbackEngine, EngineFactory)
+│   └── bridge/          # C-ABI FFI glue (ffi_signatures, ffi_loader, ffi_marshaler) & fallback drivers
+│
+├── libs/                # Precompiled native libraries (Android arm64-v8a, armeabi-v7a)
+├── rust_core/           # Native Rust engine source (tokio, symphonia, ringbuf)
+├── scripts/             # Build & packaging scripts
+├── Makefile             # Automated build, test, and packaging targets
 ├── INSTALL.md           # Installation guide
-└── tests/               # 12 standalone test suites (runnable via LuaJIT)
+└── tests/               # 14 standalone test suites (runnable via LuaJIT & cargo)
 ```
 
 ---
@@ -38,9 +53,9 @@ koreader_tts/
 ## Quick Start
 
 1. Copy the plugin folder to your KOReader plugins directory:
+   - **Android**: `/sdcard/koreader/plugins/koreader_tts.koplugin/`
    - **Kobo**: `/.kobo/koreader/plugins/koreader_tts.koplugin/`
    - **Kindle**: `/mnt/us/koreader/plugins/koreader_tts.koplugin/`
-   - **Android**: `/sdcard/koreader/plugins/koreader_tts.koplugin/`
    - **PocketBook**: `/system/koreader/plugins/koreader_tts.koplugin/`
 2. Restart KOReader, go to **Settings (Gear)** → **Plugin management**, and enable **koreader_tts**.
 3. Open a book, tap top menu → **Text-to-Speech (TTS)** → **Server settings**:
@@ -54,21 +69,10 @@ See [INSTALL.md](INSTALL.md) for detailed platform-specific setup and troublesho
 
 ## Testing
 
-Run all 12 test suites locally using LuaJIT:
+Run all 30 Rust tests and 14 Lua test suites locally:
 
 ```bash
-luajit tests/test_phase1_settings.lua && \
-luajit tests/verify_acceptance_phase1.lua && \
-luajit tests/test_phase2_chunker.lua && \
-luajit tests/verify_acceptance_phase2.lua && \
-luajit tests/test_phase3_network_audio.lua && \
-luajit tests/verify_acceptance_phase3.lua && \
-luajit tests/test_phase4_queue.lua && \
-luajit tests/verify_acceptance_phase4.lua && \
-luajit tests/test_phase5_ui.lua && \
-luajit tests/verify_acceptance_phase5.lua && \
-luajit tests/test_phase6_hardening.lua && \
-luajit tests/verify_acceptance_phase6.lua
+make test
 ```
 
 ---

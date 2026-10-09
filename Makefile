@@ -39,6 +39,7 @@ test-rust:
 test-lua:
 	@echo "=== [2/2] Running Lua Unit & Acceptance Tests ==="
 	luajit tests/test_native_ffi.lua
+	luajit tests/test_clean_architecture.lua
 	@for f in tests/test_phase*.lua; do \
 		echo "-> Running $$f..."; \
 		luajit "$$f" || exit 1; \
