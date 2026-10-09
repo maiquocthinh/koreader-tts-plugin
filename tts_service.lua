@@ -97,11 +97,10 @@ local function getCandidateLibraryPaths(base_dir)
     local paths = {}
 
     if os_name == "Windows" then
+        -- Windows host dev testing only (tests run via local luajit)
         table.insert(paths, base_dir .. "rust_core/target/release/tts_core.dll")
         table.insert(paths, base_dir .. "rust_core/target/debug/tts_core.dll")
-        table.insert(paths, base_dir .. "libs/windows-x64/tts_core.dll")
-        table.insert(paths, "tts_core.dll")
-    elseif os_name == "Linux" then
+    elseif os_name == "Linux" or os_name == "POSIX" or os_name == "Android" then
         if arch_name == "arm64" or arch_name == "aarch64" then
             table.insert(paths, base_dir .. "libs/arm64-v8a/libtts_core.so")
         elseif arch_name == "arm" then
