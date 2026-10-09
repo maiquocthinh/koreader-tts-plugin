@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Async Runtime & Network
 tokio = { version = "1.38", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+tokio-util = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 bytes = "1.6"
 

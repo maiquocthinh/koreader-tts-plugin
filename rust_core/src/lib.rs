@@ -4,6 +4,7 @@
 //! prefetch queue scheduling, and native audio sink integration.
 
 pub mod c_api;
+pub mod http_client;
 
 #[cfg(target_os = "android")]
 pub fn init_logging() {
