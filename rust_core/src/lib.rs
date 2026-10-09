@@ -4,8 +4,10 @@
 //! prefetch queue scheduling, and native audio sink integration.
 
 pub mod audio_decoder;
+pub mod audio_sink;
 pub mod c_api;
 pub mod cache_manager;
+pub mod event_ring_buffer;
 pub mod http_client;
 pub mod prefetch_queue;
 
