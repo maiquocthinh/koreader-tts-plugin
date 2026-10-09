@@ -12,34 +12,31 @@ on:
 
 jobs:
   test:
-    name: Run Unit & Acceptance Tests
+    name: Run Rust & Lua Test Suites
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install LuaJIT
         run: |
           sudo apt-get update
           sudo apt-get install -y luajit
 
-      - name: Run All 12 Test Suites
+      - name: Run Rust Unit Tests
         run: |
-          luajit tests/test_phase1_settings.lua
-          luajit tests/verify_acceptance_phase1.lua
-          luajit tests/test_phase2_chunker.lua
-          luajit tests/verify_acceptance_phase2.lua
-          luajit tests/test_phase3_network_audio.lua
-          luajit tests/verify_acceptance_phase3.lua
-          luajit tests/test_phase4_queue.lua
-          luajit tests/verify_acceptance_phase4.lua
-          luajit tests/test_phase5_ui.lua
-          luajit tests/verify_acceptance_phase5.lua
-          luajit tests/test_phase6_hardening.lua
-          luajit tests/verify_acceptance_phase6.lua
+          cd rust_core
+          cargo test
 
-  package:
-    name: Package Release Artifact
+      - name: Run Lua Unit & Acceptance Test Suites
+        run: |
+          make test-lua
+
+  build-and-package:
+    name: Build Android Binaries & Package Release
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -48,22 +45,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare Plugin Directory
+      - name: Set up Rust Toolchain with Android Targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Cross-compile Android Native Core (arm64-v8a, armeabi-v7a)
         run: |
-          mkdir -p dist/koreader_tts.koplugin
-          cp _meta.lua dist/koreader_tts.koplugin/
-          cp main.lua dist/koreader_tts.koplugin/
-          cp settings.lua dist/koreader_tts.koplugin/
-          cp text_chunker.lua dist/koreader_tts.koplugin/
-          cp tts_client.lua dist/koreader_tts.koplugin/
-          cp audio_backend.lua dist/koreader_tts.koplugin/
-          cp android_player.lua dist/koreader_tts.koplugin/
-          cp playback_queue.lua dist/koreader_tts.koplugin/
-          cp ui_player.lua dist/koreader_tts.koplugin/
-          cp sleep_timer.lua dist/koreader_tts.koplugin/
-          cp README.md dist/koreader_tts.koplugin/
-          cp INSTALL.md dist/koreader_tts.koplugin/
-          cp LICENSE dist/koreader_tts.koplugin/
+          bash scripts/build_android.sh
+
+      - name: Package Plugin Distribution
+        run: |
+          bash scripts/package_plugin.sh
 
       - name: Create ZIP Package
         run: |

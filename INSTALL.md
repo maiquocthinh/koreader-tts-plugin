@@ -4,37 +4,34 @@ A concise guide to installing and configuring the KOReader TTS Plugin (OpenAI-co
 
 ---
 
-## 1. Plugin Directory by Device
+## 1. Supported Platforms & Status
 
-Connect your device via USB and locate the KOReader plugins directory:
-
-| Device | Plugin Path |
-| :--- | :--- |
-| **Kobo** | `/.kobo/koreader/plugins/koreader_tts.koplugin/` |
-| **Kindle (Jailbroken)** | `/mnt/us/koreader/plugins/koreader_tts.koplugin/` |
-| **Android (Boox, Meebook, etc.)** | `/sdcard/koreader/plugins/koreader_tts.koplugin/` |
-| **PocketBook** | `/system/koreader/plugins/koreader_tts.koplugin/` |
-| **Desktop / Linux PC** | `~/.config/koreader/plugins/koreader_tts.koplugin/` |
+| Platform | Architecture / Core | Status | Plugin Path |
+| :--- | :--- | :--- | :--- |
+| **Android (Onyx Boox, Meebook, Phones, Tablets)** | `arm64-v8a`, `armeabi-v7a` (`libtts_core.so`) | **Primary & Tested** | `/sdcard/koreader/plugins/koreader_tts.koplugin/` |
+| **Linux Desktop / Emulator** | In-process Lua / FFI | Development & Test | `~/.config/koreader/plugins/koreader_tts.koplugin/` |
+| **Kindle / Kobo / PocketBook** | Musl static / Pure Lua fallback | Experimental / WIP | `/.kobo/` or `/mnt/us/` plugins folder |
 
 ---
 
-## 2. Installation Steps
+## 2. Installation Steps (Android)
 
-1. Copy all project files into `koreader_tts.koplugin/` at the path listed above:
+1. Package or download the plugin archive (`koreader_tts.koplugin/`). The package contains:
    ```text
    koreader_tts.koplugin/
-   ├── _meta.lua
-   ├── main.lua
-   ├── settings.lua
-   ├── text_chunker.lua
-   ├── tts_client.lua
-   ├── audio_backend.lua
-   ├── playback_queue.lua
-   ├── ui_player.lua
-   └── sleep_timer.lua
+   ├── _meta.lua            # Plugin metadata
+   ├── main.lua             # Entry point
+   ├── src/                 # Modular architecture (ui, service, engine, bridge)
+   └── libs/                # Native binaries (arm64-v8a, armeabi-v7a)
+       ├── arm64-v8a/libtts_core.so
+       └── armeabi-v7a/libtts_core.so
    ```
-2. Eject USB safely and restart KOReader.
-3. In KOReader, go to **Settings (Gear icon)** → **Plugin management** → enable `[X] koreader_tts`.
+2. Copy the folder to your Android device via ADB or USB:
+   ```bash
+   adb push dist/koreader_tts.koplugin /sdcard/koreader/plugins/
+   ```
+3. Restart KOReader.
+4. In KOReader, go to **Settings (Gear icon)** → **Plugin management** → enable `[X] koreader_tts`.
 
 ---
 
