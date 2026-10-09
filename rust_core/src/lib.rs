@@ -3,6 +3,7 @@
 //! Provides non-blocking background network I/O, audio decoding,
 //! prefetch queue scheduling, and native audio sink integration.
 
+pub mod audio_decoder;
 pub mod c_api;
 pub mod http_client;
 
