@@ -9,3 +9,10 @@ vieneu-tts/
 cache/
 dist/
 ref/
+
+# Rust build artifacts
+target/
+**/target/
+Cargo.lock.bak
+*.rs.bk
+*.pdb
