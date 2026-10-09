@@ -81,6 +81,13 @@ function ITtsEngine:getSlotStatus(chunk_index)
     error("ITtsEngine:getSlotStatus must be implemented by subclass")
 end
 
+--- Dynamically updates engine configuration (server_url, voice, format, speed, api_key).
+-- @param options Configuration options table
+-- @return boolean Success
+function ITtsEngine:updateConfig(options)
+    return true
+end
+
 --- Destroys the engine context and frees allocated resources.
 function ITtsEngine:destroy()
 end

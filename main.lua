@@ -20,26 +20,13 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local ButtonDialog = require("ui/widget/buttondialog")
 
-local ok_settings, Settings = pcall(require, "src.service.settings_manager")
-if not ok_settings then Settings = require("settings") end
-
-local ok_chunker, TextChunker = pcall(require, "src.service.document_chunker")
-if not ok_chunker then TextChunker = require("text_chunker") end
-
-local ok_client, TTSClient = pcall(require, "src.bridge.fallback.tts_client")
-if not ok_client then TTSClient = require("tts_client") end
-
-local ok_factory, EngineFactory = pcall(require, "src.engine.engine_factory")
-if not ok_factory then EngineFactory = require("tts_service") end
-
-local ok_audio, AudioBackend = pcall(require, "src.bridge.fallback.audio_backend")
-if not ok_audio then AudioBackend = require("audio_backend") end
-
-local ok_queue, PlaybackQueue = pcall(require, "src.service.reading_coordinator")
-if not ok_queue then PlaybackQueue = require("playback_queue") end
-
-local ok_ui, UIPlayer = pcall(require, "src.ui.player_widget")
-if not ok_ui then UIPlayer = require("ui_player") end
+local Settings = require("src.service.settings_manager")
+local TextChunker = require("src.service.document_chunker")
+local TTSClient = require("src.bridge.fallback.tts_client")
+local EngineFactory = require("src.engine.engine_factory")
+local AudioBackend = require("src.bridge.fallback.audio_backend")
+local PlaybackQueue = require("src.service.reading_coordinator")
+local UIPlayer = require("src.ui.player_widget")
 
 local ok_gettext, _ = pcall(require, "gettext")
 if not ok_gettext or type(_) ~= "function" then
@@ -906,7 +893,7 @@ function KoreaderTTS:showSettingsDialog()
         input_dialog = InputDialog:new{
             title = _("Địa chỉ máy chủ âm thanh"),
             input = this.settings:get("server_url") or "",
-            input_hint = "http://192.168.1.100:7860",
+            input_hint = "https://api.openai.com/v1/audio/speech",
             buttons = {
                 {
                     {
@@ -927,6 +914,13 @@ function KoreaderTTS:showSettingsDialog()
                             if val and val ~= "" then
                                 this.settings:set("server_url", val)
                                 this.settings:save()
+                                local updated_url = this.settings:get("server_url")
+                                if this.tts_client then
+                                    this.tts_client.server_url = updated_url
+                                end
+                                if this.engine and this.engine.updateConfig then
+                                    this.engine:updateConfig({ server_url = updated_url })
+                                end
                             end
                             UIManager:close(input_dialog)
                             UIManager:nextTick(function()
@@ -945,8 +939,8 @@ function KoreaderTTS:showSettingsDialog()
         local input_dialog
         input_dialog = InputDialog:new{
             title = _("Chọn giọng đọc"),
-            input = this.settings:get("voice") or "vi-VN-NamMinh",
-            input_hint = "vi-VN-NamMinh",
+            input = this.settings:get("voice") or "alloy",
+            input_hint = "alloy",
             buttons = {
                 {
                     {
@@ -967,6 +961,12 @@ function KoreaderTTS:showSettingsDialog()
                             if val and val ~= "" then
                                 this.settings:set("voice", val)
                                 this.settings:save()
+                                if this.tts_client then
+                                    this.tts_client.voice = val
+                                end
+                                if this.engine and this.engine.updateConfig then
+                                    this.engine:updateConfig({ voice = val })
+                                end
                             end
                             UIManager:close(input_dialog)
                             UIManager:nextTick(function()
@@ -1009,6 +1009,9 @@ function KoreaderTTS:showSettingsDialog()
                         this.settings:save()
                         if this.tts_client then
                             this.tts_client.audio_format = opt.id
+                        end
+                        if this.engine and this.engine.updateConfig then
+                            this.engine:updateConfig({ audio_format = opt.id })
                         end
                         UIManager:close(format_dialog)
                         UIManager:nextTick(function()
@@ -1156,6 +1159,9 @@ function KoreaderTTS:showSettingsDialog()
                                 val = math.max(1, math.min(7, math.floor(val)))
                                 this.settings:set("preload_count", val)
                                 this.settings:save()
+                                if this.engine and this.engine.updateConfig then
+                                    this.engine:updateConfig({ preload_count = val })
+                                end
                                 UIManager:show(InfoMessage:new{
                                     text = string.format(_("Đã lưu số câu đệm: %d câu"), val),
                                     timeout = 2,
@@ -1203,6 +1209,9 @@ function KoreaderTTS:showSettingsDialog()
                                 this.settings:save()
                                 if this.audio_backend then
                                     this.audio_backend:setSpeed(val)
+                                end
+                                if this.engine and this.engine.updateConfig then
+                                    this.engine:updateConfig({ speed = val })
                                 end
                                 if this.ui_player and this.ui_player.speed_btn and this.ui_player.speed_btn.setText then
                                     this.ui_player.speed_btn:setText(string.format(_("Tốc độ: %.1fx"), val))

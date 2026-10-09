@@ -37,18 +37,18 @@ test-rust:
 	cd rust_core && cargo test
 
 test-lua:
-	@echo "=== [2/2] Running Lua Unit & Acceptance Tests ==="
-	luajit tests/test_native_ffi.lua
-	luajit tests/test_clean_architecture.lua
-	@for f in tests/test_phase*.lua; do \
-		echo "-> Running $$f..."; \
-		luajit "$$f" || exit 1; \
-	done
-	@for f in tests/verify_acceptance_phase*.lua; do \
-		echo "-> Running $$f..."; \
-		luajit "$$f" || exit 1; \
-	done
-	@echo "=== ALL TESTS PASSED 100% ==="
+	@echo "=== [2/2] Running Lua Unit & Acceptance Test Suites ==="
+	@echo "-> [1/5] Running Bridge tests..."
+	@luajit tests/test_bridge.lua || exit 1
+	@echo "-> [2/5] Running Engine Strategy tests..."
+	@luajit tests/test_engine.lua || exit 1
+	@echo "-> [3/5] Running Application Service tests..."
+	@luajit tests/test_service.lua || exit 1
+	@echo "-> [4/5] Running Presentation UI tests..."
+	@luajit tests/test_ui.lua || exit 1
+	@echo "-> [5/5] Running End-to-End Acceptance tests..."
+	@luajit tests/test_acceptance.lua || exit 1
+	@echo "=== ALL LUA TESTS PASSED 100% ==="
 
 install-adb: package
 	@echo "=== Installing Plugin to Android Device via ADB ==="

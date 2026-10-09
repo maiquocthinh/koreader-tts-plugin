@@ -23,17 +23,6 @@ koreader_tts/
 ├── _meta.lua            # Plugin metadata entry point
 ├── main.lua             # WidgetContainer entry point & menu integration
 │
-├── [Root Shims - 100% Backward Compatibility]
-├── settings.lua         # Forwarding shim -> src/service/settings_manager
-├── text_chunker.lua     # Forwarding shim -> src/service/document_chunker
-├── playback_queue.lua   # Forwarding shim -> src/service/reading_coordinator
-├── ui_player.lua        # Forwarding shim -> src/ui/player_widget
-├── sleep_timer.lua      # Forwarding shim -> src/service/sleep_timer
-├── tts_service.lua      # Forwarding shim -> src/engine/engine_factory
-├── tts_client.lua       # Forwarding shim -> src/bridge/fallback/tts_client
-├── audio_backend.lua    # Forwarding shim -> src/bridge/fallback/audio_backend
-├── android_player.lua   # Forwarding shim -> src/bridge/fallback/android_player
-│
 ├── src/
 │   ├── ui/              # Presentation layer (player_widget, canvas_highlight)
 │   ├── service/         # Application service layer (reading_coordinator, document_chunker, etc.)
@@ -45,7 +34,7 @@ koreader_tts/
 ├── scripts/             # Build & packaging scripts
 ├── Makefile             # Automated build, test, and packaging targets
 ├── INSTALL.md           # Installation guide
-└── tests/               # 14 standalone test suites (runnable via LuaJIT & cargo)
+└── tests/               # Modular test suites (runnable via LuaJIT & cargo)
 ```
 
 ---
@@ -59,8 +48,8 @@ koreader_tts/
    - **PocketBook**: `/system/koreader/plugins/koreader_tts.koplugin/`
 2. Restart KOReader, go to **Settings (Gear)** → **Plugin management**, and enable **koreader_tts**.
 3. Open a book, tap top menu → **Text-to-Speech (TTS)** → **Server settings**:
-   - **Server URL**: e.g. `http://192.168.1.100:7860`
-   - **Voice**: e.g. `vi-VN-NamMinh`
+   - **Server URL**: e.g. `https://api.openai.com/v1/audio/speech` (or self-hosted `http://<server-ip>:8000/v1/audio/speech`)
+   - **Voice**: e.g. `alloy`
 4. Tap **Start reading from here** or **Test single sentence**.
 
 See [INSTALL.md](INSTALL.md) for detailed platform-specific setup and troubleshooting.
@@ -69,7 +58,7 @@ See [INSTALL.md](INSTALL.md) for detailed platform-specific setup and troublesho
 
 ## Testing
 
-Run all 30 Rust tests and 14 Lua test suites locally:
+Run all 30 Rust tests and 5 modular Lua test suites locally:
 
 ```bash
 make test

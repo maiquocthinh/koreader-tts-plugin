@@ -42,7 +42,7 @@ Connect your device via USB and locate the KOReader plugins directory:
 
 1. Open any book (EPUB, MOBI, PDF).
 2. Swipe down from top edge to open Top Menu → **Text-to-Speech (TTS)** → **Settings**:
-   - **Server URL**: e.g. `http://192.168.1.100:7860` (or your cloud endpoint).
+   - **Server URL**: e.g. `https://api.openai.com/v1/audio/speech` (or self-hosted `http://<server-ip>:8000/v1/audio/speech`).
    - **Voice**: ID of the voice provided by your TTS server.
    - **Speed**: `0.5x` - `2.0x` (default: `1.0x`).
 3. Tap **Test single sentence** to verify connectivity and audio output.

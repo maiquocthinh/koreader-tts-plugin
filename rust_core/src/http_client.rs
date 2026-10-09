@@ -84,10 +84,10 @@ fn default_tcp_keepalive_secs() -> u64 {
     60
 }
 
-impl Default for HttpClientConfig {
+    impl Default for HttpClientConfig {
     fn default() -> Self {
         Self {
-            server_url: "http://127.0.0.1:8000/v1/audio/speech".to_string(),
+            server_url: "https://api.openai.com/v1/audio/speech".to_string(),
             api_key: None,
             timeout_secs: default_timeout_secs(),
             connect_timeout_secs: default_connect_timeout_secs(),

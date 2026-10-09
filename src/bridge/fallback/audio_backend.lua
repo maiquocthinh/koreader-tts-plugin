@@ -189,7 +189,10 @@ function AudioBackend:new(options)
     instance:_detectDriver()
 
     if instance.driver_name == "android" then
-        local ok_ap, AP = pcall(require, "android_player")
+        local ok_ap, AP = pcall(require, "src.bridge.fallback.android_player")
+        if not ok_ap or not AP then
+            ok_ap, AP = pcall(require, "android_player")
+        end
         if ok_ap and AP then
             instance._android_player = AP:new()
             pcall(function() instance._android_player:init() end)

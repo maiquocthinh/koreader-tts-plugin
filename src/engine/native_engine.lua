@@ -41,8 +41,8 @@ function NativeEngine:new(options, lib, loaded_path)
     local instance = setmetatable({}, self)
     instance.lib = lib
     instance.loaded_path = loaded_path
-    instance.server_url = options.server_url or "http://127.0.0.1:8000/v1/audio/speech"
-    instance.voice = options.voice or "duc_tri"
+    instance.server_url = options.server_url or "https://api.openai.com/v1/audio/speech"
+    instance.voice = options.voice or "alloy"
     instance.audio_format = options.audio_format or "wav"
     instance.speed = options.speed or 1.0
     instance.api_key = options.api_key or ""
@@ -144,6 +144,31 @@ function NativeEngine:getSlotStatus(chunk_index)
         is_playing = false,
         duration_seconds = 0.0,
     }
+end
+
+function NativeEngine:updateConfig(new_options)
+    new_options = new_options or {}
+    if new_options.server_url then self.server_url = new_options.server_url end
+    if new_options.voice then self.voice = new_options.voice end
+    if new_options.audio_format then self.audio_format = new_options.audio_format end
+    if new_options.speed then self.speed = new_options.speed end
+    if new_options.api_key ~= nil then self.api_key = new_options.api_key end
+    if new_options.preload_count then self.preload_count = new_options.preload_count end
+
+    if self.ctx and self.lib and self.lib.tts_core_context_update_config then
+        local config_table = {
+            server_url = self.server_url,
+            voice = self.voice,
+            audio_format = self.audio_format,
+            speed = self.speed,
+            api_key = (self.api_key ~= "") and self.api_key or nil,
+            cache_dir = self.cache_dir,
+            preload_count = self.preload_count,
+        }
+        local c_json = FfiMarshaler.marshalConfigJson(config_table)
+        return self.lib.tts_core_context_update_config(self.ctx, c_json) == 0
+    end
+    return true
 end
 
 function NativeEngine:destroy()

@@ -10,16 +10,17 @@ local SETTING_KEY = "koreader_tts"
 
 -- Default configuration schema
 local DEFAULT_SETTINGS = {
-    -- 1. Server & Network
-    server_url          = "http://192.168.1.100:7860", -- Base API endpoint (OpenAI-compatible)
-    api_key             = "",                          -- Bearer token (optional)
-    request_timeout     = 10,                          -- Network timeout in seconds
+    -- 1. Server & Network (Standard OpenAI-compatible TTS API)
+    server_url          = "https://api.openai.com/v1/audio/speech", -- Base API endpoint (POST /v1/audio/speech)
+    model               = "tts-1",                                 -- OpenAI model identifier
+    api_key             = "",                                      -- Bearer token (optional)
+    request_timeout     = 10,                                      -- Network timeout in seconds
 
     -- 2. Voice & Audio
-    voice               = "vi-VN-NamMinh",             -- Voice identifier
-    speed               = 1.0,                         -- Playback speed (0.5 - 2.0)
-    audio_backend       = "auto",                      -- "auto" | "android" | "mpv" | "aplay"
-    audio_format        = "wav",                       -- "wav" | "flac" | "mp3" | "opus"
+    voice               = "alloy",                                 -- Voice identifier (OpenAI standard default)
+    speed               = 1.0,                                     -- Playback speed (0.5 - 2.0)
+    audio_backend       = "auto",                                  -- "auto" | "android" | "mpv" | "aplay"
+    audio_format        = "wav",                                   -- "wav" | "flac" | "mp3" | "opus"
 
     -- 3. Chunking & Buffer
     chunk_mode          = "sentence",                  -- "sentence"
@@ -145,6 +146,10 @@ function Settings:set(key, value)
         value = math.max(1, math.floor(value))
     elseif key == "server_url" then
         value = value:gsub("/+$", "")
+        -- Normalize base URL to standard OpenAI speech endpoint if path is omitted
+        if value ~= "" and not value:find("/v1/audio/speech") and not value:find("/audio/speech") then
+            value = value .. "/v1/audio/speech"
+        end
     elseif key == "audio_backend" then
         local allowed = { auto = true, android = true, mpv = true, aplay = true }
         if not allowed[value] then

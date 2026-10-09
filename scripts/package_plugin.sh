@@ -13,19 +13,10 @@ echo "=== [1/3] Preparing Distribution Directory ==="
 rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}"
 
-echo "=== [2/3] Copying Plugin Lua Modules ==="
+echo "=== [2/3] Copying Plugin Lua Entry Points ==="
 LUA_FILES=(
     "_meta.lua"
     "main.lua"
-    "playback_queue.lua"
-    "text_chunker.lua"
-    "settings.lua"
-    "sleep_timer.lua"
-    "ui_player.lua"
-    "tts_service.lua"
-    "tts_client.lua"
-    "audio_backend.lua"
-    "android_player.lua"
 )
 
 for file in "${LUA_FILES[@]}"; do

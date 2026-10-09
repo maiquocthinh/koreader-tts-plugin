@@ -78,7 +78,7 @@ end
 -- @return table { scheme, host, port, path }
 local function parse_url(url)
     if not url or url == "" then
-        url = "http://192.168.1.100:7860"
+        url = "https://api.openai.com/v1/audio/speech"
     end
     url = url:gsub("^%s+", ""):gsub("%s+$", "")
 
@@ -123,8 +123,9 @@ function TTSClient:new(options)
     local instance = setmetatable({}, self)
     options = options or {}
 
-    instance.server_url = options.server_url or "http://192.168.1.100:7860"
-    instance.voice = options.voice or "vi-VN-NamMinh"
+    instance.server_url = options.server_url or "https://api.openai.com/v1/audio/speech"
+    instance.model = options.model or "tts-1"
+    instance.voice = options.voice or "alloy"
     instance.audio_format = options.audio_format or "wav"
     instance.api_key = options.api_key or ""
     instance.timeout = options.request_timeout or 15
@@ -321,8 +322,9 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
         return cancel_handle
     end
 
-    -- 3. Prepare payload and headers
+    -- 3. Prepare OpenAI-compatible payload and headers
     local payload = json_encode({
+        model = self.model or "tts-1",
         input = text,
         voice = voice,
         speed = speed,

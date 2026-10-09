@@ -135,10 +135,10 @@ pub struct CoreConfig {
 }
 
 fn default_server_url() -> String {
-    "http://127.0.0.1:8000/v1/audio/speech".to_string()
+    "https://api.openai.com/v1/audio/speech".to_string()
 }
 fn default_voice() -> String {
-    "duc_tri".to_string()
+    "alloy".to_string()
 }
 fn default_format() -> String {
     "wav".to_string()

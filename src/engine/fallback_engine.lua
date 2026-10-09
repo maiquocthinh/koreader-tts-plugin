@@ -22,8 +22,8 @@ function FallbackEngine:new(options)
     local instance = setmetatable({}, self)
     options = options or {}
 
-    instance.server_url = options.server_url or "http://127.0.0.1:8000/v1/audio/speech"
-    instance.voice = options.voice or "duc_tri"
+    instance.server_url = options.server_url or "https://api.openai.com/v1/audio/speech"
+    instance.voice = options.voice or "alloy"
     instance.audio_format = options.audio_format or "wav"
     instance.speed = options.speed or 1.0
     instance.api_key = options.api_key or ""
@@ -116,6 +116,23 @@ function FallbackEngine:getSlotStatus(chunk_index)
         is_playing = false,
         duration_seconds = 0.0,
     }
+end
+
+function FallbackEngine:updateConfig(new_options)
+    new_options = new_options or {}
+    if new_options.server_url then self.server_url = new_options.server_url end
+    if new_options.voice then self.voice = new_options.voice end
+    if new_options.audio_format then self.audio_format = new_options.audio_format end
+    if new_options.speed then self.speed = new_options.speed end
+    if new_options.api_key ~= nil then self.api_key = new_options.api_key end
+    if new_options.preload_count then self.preload_count = new_options.preload_count end
+    if self.client then
+        if new_options.server_url then self.client.server_url = new_options.server_url end
+        if new_options.voice then self.client.voice = new_options.voice end
+        if new_options.audio_format then self.client.audio_format = new_options.audio_format end
+        if new_options.api_key ~= nil then self.client.api_key = new_options.api_key end
+    end
+    return true
 end
 
 function FallbackEngine:destroy()
