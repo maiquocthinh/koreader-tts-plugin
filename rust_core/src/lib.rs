@@ -5,7 +5,9 @@
 
 pub mod audio_decoder;
 pub mod c_api;
+pub mod cache_manager;
 pub mod http_client;
+pub mod prefetch_queue;
 
 #[cfg(target_os = "android")]
 pub fn init_logging() {
