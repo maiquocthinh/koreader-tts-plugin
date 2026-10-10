@@ -22,7 +22,6 @@ local ButtonDialog = require("ui/widget/buttondialog")
 
 local Settings = require("src.service.settings_manager")
 local TextChunker = require("src.service.document_chunker")
-local TTSClient = require("src.bridge.fallback.tts_client")
 local EngineFactory = require("src.engine.engine_factory")
 local AudioBackend = require("src.bridge.fallback.audio_backend")
 local PlaybackQueue = require("src.service.reading_coordinator")
@@ -45,21 +44,23 @@ function KoreaderTTS:init()
         logger.warn("KoreaderTTS:init() called! ui=", tostring(self.ui))
     end
     self.settings = Settings:new()
-    self.tts_client = TTSClient:new{
-        server_url = self.settings:get("server_url"),
-        voice = self.settings:get("voice"),
-        audio_format = self.settings:get("audio_format"),
-        api_key = self.settings:get("api_key"),
-        request_timeout = self.settings:get("request_timeout"),
-    }
+    local cache_dir = "cache/tts"
+    local ok_ds, DataStorage = pcall(require, "datastorage")
+    if ok_ds and DataStorage and type(DataStorage.getDataDir) == "function" then
+        local data_dir = DataStorage:getDataDir()
+        if data_dir and data_dir ~= "" then
+            cache_dir = data_dir .. "/cache/tts"
+        end
+    end
+
     self.engine = EngineFactory.create{
         server_url = self.settings:get("server_url"),
         voice = self.settings:get("voice"),
         audio_format = self.settings:get("audio_format"),
         speed = self.settings:get("speed"),
         api_key = self.settings:get("api_key"),
-        cache_dir = "cache/tts",
-        preload_count = self.settings:get("preload_count") or 3,
+        cache_dir = cache_dir,
+        preload_count = self.settings:get("preload_count") or 1,
         plugin_dir = plugin_path,
     }
     self.tts_service = self.engine
@@ -71,7 +72,7 @@ function KoreaderTTS:init()
 
     local this = self
     local chunker = TextChunker:new{
-        min_chars = 30,
+        min_chars = self.settings:get("min_chunk_chars") or 120,
         max_chars = self.settings:get("max_chunk_chars") or 300,
         filter_footnotes = self.settings:get("filter_footnotes"),
         custom_mappings = self.settings:getCustomMappings(),
@@ -82,7 +83,6 @@ function KoreaderTTS:init()
         ui = self.ui,
         document = self.ui and self.ui.document,
         chunker = chunker,
-        tts_client = self.tts_client,
         engine = self.engine,
         tts_service = self.tts_service,
         audio_backend = self.audio_backend,
@@ -260,6 +260,49 @@ function KoreaderTTS:addToMainMenu(menu_items)
     }
 end
 
+--- Synchronize when the user turns page manually in KOReader reader view
+function KoreaderTTS:onPageUpdate(page_number)
+    self:_handleUserPageTurn(page_number)
+end
+
+function KoreaderTTS:onGotoPage(page_number)
+    self:_handleUserPageTurn(page_number)
+end
+
+function KoreaderTTS:_handleUserPageTurn(page_number)
+    if not page_number or page_number <= 0 then return end
+    if not self.playback_queue then return end
+
+    if self._page_turn_timer and UIManager.unschedule then
+        UIManager:unschedule(self._page_turn_timer)
+        self._page_turn_timer = nil
+    end
+
+    local this = self
+    self._page_turn_timer = UIManager:scheduleIn(0.2, function()
+        this._page_turn_timer = nil
+        if not this.playback_queue then return end
+
+        local cur_p = this.playback_queue:getCurrentPage()
+        if cur_p ~= page_number then
+            if this.playback_queue:getState() == "PLAYING" then
+                -- Actively reading: jump to new page sentence 1 seamlessly!
+                this.playback_queue:seekChunk(page_number, 1)
+            else
+                -- Paused or idle: update coordinates and widget to match screen view
+                this.playback_queue.current_page = page_number
+                this.playback_queue.current_index = 1
+                this.playback_queue._page_cache[page_number] = nil
+                local chunks = this.playback_queue:_getPageChunks(page_number)
+                local chunk = chunks and chunks[1]
+                if this.ui_player and this.ui_player.visible then
+                    this.ui_player:onChunkChange(chunk, page_number, 1, #chunks)
+                end
+            end
+        end
+    end)
+end
+
 --- Get current active page number across all KOReader view modes
 function KoreaderTTS:getCurrentPageNumber()
     if self.ui and type(self.ui.getCurrentPage) == "function" then
@@ -418,8 +461,8 @@ function KoreaderTTS:onStopTTS()
     if self.ui_player then
         self.ui_player:hide()
     end
-    if self.tts_client then
-        self.tts_client:clearCache(86400)
+    if self.engine and self.engine.client and self.engine.client.clearCache then
+        pcall(self.engine.client.clearCache, self.engine.client, 86400)
     end
     UIManager:show(InfoMessage:new{
         text = _("Đã dừng đọc."),
@@ -469,21 +512,20 @@ function KoreaderTTS:onTestSingleSentence()
         test_text = _("Chào mừng bạn đến với KOReader. Đây là câu thử nghiệm kết nối máy chủ và kiểm tra âm thanh.")
     end
 
+    -- Pause active reading queue if playing
+    if self.playback_queue and self.playback_queue:getState() == "PLAYING" then
+        self.playback_queue:pause()
+    end
+
     UIManager:show(InfoMessage:new{
         text = string.format(_("Đang tải âm thanh thử nghiệm...\n'%s'"), test_text),
         timeout = 2,
     })
 
-    -- Sync latest configuration from settings
-    self.tts_client.server_url = self.settings:get("server_url")
-    self.tts_client.voice = self.settings:get("voice")
-    self.tts_client.audio_format = self.settings:get("audio_format") or "wav"
-    self.tts_client.api_key = self.settings:get("api_key")
-    self.tts_client.timeout = self.settings:get("request_timeout")
+    local this = self
     self.audio_backend:setSpeed(self.settings:get("speed"))
 
-    local this = self
-    self.tts_client:fetchSpeechAsync(test_text, function(success, result_or_err)
+    self.engine:synthesizeSingle(test_text, function(success, result_or_err)
         if not success then
             UIManager:show(InfoMessage:new{
                 text = string.format(_("Lỗi tải âm thanh từ máy chủ:\n%s"), tostring(result_or_err)),
@@ -500,16 +542,11 @@ function KoreaderTTS:onTestSingleSentence()
                     timeout = 2,
                 })
             end
-        end)
+        end, { speed = this.settings:get("speed") })
 
         local driver = this.audio_backend._active_process or this.audio_backend.driver_name or "timer"
-        local lat_ms = (this.tts_client and this.tts_client.last_latency_ms) or 0
-        local ping_info = string.format("%.2fs", lat_ms / 1000)
-        local health = "Tốt ⚡"
-        if lat_ms > 4000 then health = "Chậm ⚠️"
-        elseif lat_ms > 2000 then health = "Bình thường" end
         UIManager:show(InfoMessage:new{
-            text = string.format(_("Đang phát câu thử nghiệm... [%s · Phản hồi: %s (%s)]\n'%s'"), tostring(driver), ping_info, health, test_text),
+            text = string.format(_("Đang phát câu thử nghiệm... [%s]\n'%s'"), tostring(driver), test_text),
             timeout = 3,
         })
     end)
@@ -520,20 +557,22 @@ function KoreaderTTS:onStartTTS()
     local document = self.ui and self.ui.document
     local current_page = self:getCurrentPageNumber()
 
-    -- Update subsystems with latest settings
-    if self.tts_client then
-        self.tts_client.server_url = self.settings:get("server_url")
-        self.tts_client.voice = self.settings:get("voice")
-        self.tts_client.audio_format = self.settings:get("audio_format") or "wav"
-        self.tts_client.api_key = self.settings:get("api_key")
-        self.tts_client.timeout = self.settings:get("request_timeout")
+    local ok_log, logger = pcall(require, "logger")
+    if ok_log and logger and logger.warn then
+        logger.warn(string.format("[TTS DEBUG] onStartTTS: current_page=%s, ui:getCurrentPage=%s, paging.current_page=%s, doc:getCurrentPage=%s",
+            tostring(current_page),
+            tostring(self.ui and type(self.ui.getCurrentPage) == "function" and self.ui:getCurrentPage()),
+            tostring(self.ui and self.ui.paging and self.ui.paging.current_page),
+            tostring(document and type(document.getCurrentPage) == "function" and document:getCurrentPage())
+        ))
     end
+
     if self.audio_backend then
         self.audio_backend:setSpeed(self.settings:get("speed"))
     end
 
-    local chunker = TextChunker:new{
-        min_chars = 30,
+    local chunker = self.chunker or TextChunker:new{
+        min_chars = self.settings:get("min_chunk_chars") or 120,
         max_chars = self.settings:get("max_chunk_chars") or 300,
         filter_footnotes = self.settings:get("filter_footnotes"),
         custom_mappings = self.settings:getCustomMappings(),
@@ -541,6 +580,10 @@ function KoreaderTTS:onStartTTS()
     self.chunker = chunker
 
     local chunks = chunker:extractPageChunks(document, current_page, self.ui)
+    if ok_log and logger and logger.warn then
+        logger.warn(string.format("[TTS DEBUG] onStartTTS: page=%s, chunks_count=%d, first_chunk='%s'",
+            tostring(current_page), #chunks, tostring(chunks[1] and chunks[1].text)))
+    end
 
     -- If current page is empty (e.g. cover/title/illustration page), scan ahead up to 10 pages
     if #chunks == 0 and document then
@@ -635,7 +678,7 @@ function KoreaderTTS:onReadSelectedText(selected_text)
     })
 
     local this = self
-    self.tts_client:fetchSpeechAsync(cleaned, function(success, result_or_err)
+    self.engine:synthesizeSingle(cleaned, function(success, result_or_err)
         if not success then
             UIManager:show(InfoMessage:new{
                 text = string.format(_("Lỗi tải âm thanh đoạn chọn:\n%s"), tostring(result_or_err)),
@@ -656,7 +699,7 @@ function KoreaderTTS:onReadSelectedText(selected_text)
                     timeout = 2,
                 })
             end
-        end)
+        end, { speed = this.settings:get("speed") })
     end)
 end
 
@@ -915,9 +958,6 @@ function KoreaderTTS:showSettingsDialog()
                                 this.settings:set("server_url", val)
                                 this.settings:save()
                                 local updated_url = this.settings:get("server_url")
-                                if this.tts_client then
-                                    this.tts_client.server_url = updated_url
-                                end
                                 if this.engine and this.engine.updateConfig then
                                     this.engine:updateConfig({ server_url = updated_url })
                                 end
@@ -961,9 +1001,6 @@ function KoreaderTTS:showSettingsDialog()
                             if val and val ~= "" then
                                 this.settings:set("voice", val)
                                 this.settings:save()
-                                if this.tts_client then
-                                    this.tts_client.voice = val
-                                end
                                 if this.engine and this.engine.updateConfig then
                                     this.engine:updateConfig({ voice = val })
                                 end
@@ -1007,9 +1044,6 @@ function KoreaderTTS:showSettingsDialog()
                     callback = function()
                         this.settings:set("audio_format", opt.id)
                         this.settings:save()
-                        if this.tts_client then
-                            this.tts_client.audio_format = opt.id
-                        end
                         if this.engine and this.engine.updateConfig then
                             this.engine:updateConfig({ audio_format = opt.id })
                         end
@@ -1047,7 +1081,7 @@ function KoreaderTTS:showSettingsDialog()
         local current_server = this.settings:get("server_url") or ""
         local current_voice = this.settings:get("voice") or ""
         local current_speed = this.settings:get("speed") or 1.0
-        local current_preload = this.settings:get("preload_count") or 2
+        local current_preload = this.settings:get("preload_count") or 1
         local current_format = this.settings:get("audio_format") or "wav"
 
         local sv_buttons = {
@@ -1132,12 +1166,12 @@ function KoreaderTTS:showSettingsDialog()
 
     openPreloadCountDialog = function()
         local input_dialog
-        local cur_count = this.settings:get("preload_count") or 2
+        local cur_count = this.settings:get("preload_count") or 1
         input_dialog = InputDialog:new{
             title = _("Số câu tải trước (1 - 7)"),
             input = tostring(cur_count),
             input_type = "number",
-            input_hint = "2",
+            input_hint = "1",
             buttons = {
                 {
                     {

@@ -30,6 +30,7 @@ pub struct ChunkSlot {
     pub text: String,
     pub state: SlotState,
     pub audio: Option<Arc<AudioBuffer>>,
+    pub file_path: Option<String>,
     pub duration_seconds: f64,
 }
 
@@ -40,6 +41,7 @@ impl ChunkSlot {
             text,
             state: SlotState::Idle,
             audio: None,
+            file_path: None,
             duration_seconds: 0.0,
         }
     }
@@ -78,7 +80,7 @@ impl PrefetchQueue {
             next_page_generation: 0,
             next_page_slots: None,
             preload_count: if preload_count == 0 {
-                3
+                1
             } else {
                 preload_count.min(10)
             },
@@ -89,6 +91,16 @@ impl PrefetchQueue {
     pub fn load_page(&mut self, generation: u32, texts: Vec<String>) {
         self.current_generation = generation;
         self.current_playing_index = 0;
+
+        // Cross-page promotion: If next page was prefetched and generation matches, promote existing slots!
+        if self.next_page_generation == generation && self.next_page_slots.is_some() {
+            let next_slots = self.next_page_slots.take().unwrap();
+            if next_slots.len() == texts.len() {
+                self.current_slots = next_slots;
+                return;
+            }
+        }
+
         self.current_slots = texts
             .into_iter()
             .enumerate()
@@ -157,13 +169,27 @@ impl PrefetchQueue {
         audio: Arc<AudioBuffer>,
     ) {
         let duration = audio.duration_seconds;
+        self.set_chunk_ready_full(generation, is_next_page, chunk_index, Some(audio), None, duration);
+    }
+
+    /// Marks a chunk as Ready with optional in-memory audio buffer and cached disk file path.
+    pub fn set_chunk_ready_full(
+        &mut self,
+        generation: u32,
+        is_next_page: bool,
+        chunk_index: usize,
+        audio: Option<Arc<AudioBuffer>>,
+        file_path: Option<String>,
+        duration: f64,
+    ) {
         if is_next_page {
             if self.next_page_generation == generation {
                 if let Some(ref mut slots) = self.next_page_slots {
                     if let Some(slot) = slots.get_mut(chunk_index) {
                         slot.state = SlotState::Ready;
                         slot.duration_seconds = duration;
-                        slot.audio = Some(audio);
+                        slot.audio = audio;
+                        slot.file_path = file_path;
                     }
                 }
             }
@@ -171,9 +197,23 @@ impl PrefetchQueue {
             if let Some(slot) = self.current_slots.get_mut(chunk_index) {
                 slot.state = SlotState::Ready;
                 slot.duration_seconds = duration;
-                slot.audio = Some(audio);
+                slot.audio = audio;
+                slot.file_path = file_path;
             }
         }
+    }
+
+    /// Returns the cached audio file path for a given chunk index if ready.
+    pub fn get_slot_path(&self, chunk_index: usize) -> Option<String> {
+        self.current_slots
+            .get(chunk_index)
+            .and_then(|s| {
+                if s.state == SlotState::Ready {
+                    s.file_path.clone()
+                } else {
+                    None
+                }
+            })
     }
 
     /// Marks a chunk as Failed.

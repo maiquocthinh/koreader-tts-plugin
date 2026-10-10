@@ -369,6 +369,37 @@ function AudioBackend:play(file_path, on_finished, opts)
         return false, "Empty file path"
     end
 
+    -- Ensure file_path is resolved to an absolute path for platform audio drivers
+    if not file_path:match("^/") and not file_path:match("^%a:[/\\]") then
+        local ok_ds, DataStorage = pcall(require, "datastorage")
+        if ok_ds and DataStorage and type(DataStorage.getDataDir) == "function" then
+            local data_dir = DataStorage:getDataDir()
+            if data_dir and data_dir ~= "" then
+                local candidate = data_dir .. "/" .. file_path
+                local f = io.open(candidate, "rb")
+                if f then
+                    f:close()
+                    file_path = candidate
+                end
+            end
+        end
+        if not file_path:match("^/") and not file_path:match("^%a:[/\\]") then
+            local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+            if not ok_lfs or not lfs then ok_lfs, lfs = pcall(require, "lfs") end
+            if ok_lfs and lfs and type(lfs.currentdir) == "function" then
+                local cwd = lfs.currentdir()
+                if cwd and cwd ~= "" then
+                    local candidate = cwd .. "/" .. file_path
+                    local f = io.open(candidate, "rb")
+                    if f then
+                        f:close()
+                        file_path = candidate
+                    end
+                end
+            end
+        end
+    end
+
     -- Stop any previous playback
     self:stop()
 
@@ -447,7 +478,9 @@ function AudioBackend:play(file_path, on_finished, opts)
             end
             local is_done = this._android_player:isPlaybackDone()
             if is_done then
-                logger.warn("AudioBackend: check_done true! duration=", duration, "calling on_finished")
+                if ok_log and logger and logger.warn then
+                    logger.warn("AudioBackend: check_done true! duration=", duration, "calling on_finished")
+                end
                 this._is_playing = false
                 this._is_paused = false
                 this._active_poll_timer = nil

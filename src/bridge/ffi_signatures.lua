@@ -39,6 +39,7 @@ int32_t tts_core_playback_stop(TtsCoreContext* ctx);
 int32_t tts_core_playback_seek(TtsCoreContext* ctx, uint32_t generation, uint32_t chunk_index);
 int32_t tts_core_event_poll(TtsCoreContext* ctx, TtsCoreEvent* out_event);
 int32_t tts_core_slot_get_status(TtsCoreContext* ctx, uint32_t chunk_index, TtsCoreSlotStatus* out_status);
+int32_t tts_core_slot_get_path(TtsCoreContext* ctx, uint32_t chunk_index, char* out_path, uint32_t max_len);
 void tts_core_context_destroy(TtsCoreContext* ctx);
 ]])
 

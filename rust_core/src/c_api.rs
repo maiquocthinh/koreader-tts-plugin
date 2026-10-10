@@ -153,7 +153,7 @@ fn default_cache_dir() -> String {
         .to_string()
 }
 fn default_preload_count() -> usize {
-    3
+    1
 }
 
 impl Default for CoreConfig {
@@ -318,35 +318,84 @@ impl TtsCoreEngine {
 
                     // Step A: Check L1 Memory Cache
                     if let Some(mem_buf) = c_clone.get_memory(&cache_key) {
+                        let disk_path = c_clone.get_disk_path(&cache_key, &format);
+                        let path_str = if disk_path.exists() {
+                            Some(disk_path.to_string_lossy().to_string())
+                        } else {
+                            None
+                        };
+                        let duration = mem_buf.duration_seconds;
                         let mut q = q_clone.lock().unwrap();
-                        q.set_chunk_ready(
+                        q.set_chunk_ready_full(
                             target.generation,
                             target.is_next_page,
                             target.chunk_index,
-                            mem_buf,
+                            Some(mem_buf),
+                            path_str,
+                            duration,
                         );
+                        if let Ok(mut prod) = prod_clone.lock() {
+                            prod.push(TtsCoreEvent {
+                                event_type: TtsEventType::BufferUpdated as i32,
+                                generation: target.generation,
+                                chunk_index: target.chunk_index as u32,
+                                ..Default::default()
+                            });
+                        }
                         continue;
                     }
 
                     // Step B: Check L2 Disk Cache
-                    if let Ok(Some(disk_bytes)) = c_clone.get_disk_bytes(&cache_key, &format) {
-                        if let Ok(decoded_buf) =
-                            AudioDecoder::decode_from_memory(disk_bytes, Some(&format))
-                        {
-                            let arc_buf = Arc::new(decoded_buf);
-                            c_clone.put_memory(cache_key.clone(), arc_buf.clone());
-                            let mut q = q_clone.lock().unwrap();
-                            q.set_chunk_ready(
-                                target.generation,
-                                target.is_next_page,
-                                target.chunk_index,
-                                arc_buf,
-                            );
-                            continue;
+                    let disk_path = c_clone.get_disk_path(&cache_key, &format);
+                    if disk_path.exists() {
+                        let path_str = disk_path.to_string_lossy().to_string();
+                        let decoded_opt = match c_clone.get_disk_bytes(&cache_key, &format) {
+                            Ok(Some(bytes)) => AudioDecoder::decode_from_memory(bytes, Some(&format)).ok(),
+                            _ => None,
+                        };
+                        let (arc_buf, dur) = if let Some(decoded) = decoded_opt {
+                            let dur = decoded.duration_seconds;
+                            let arc = Arc::new(decoded);
+                            c_clone.put_memory(cache_key.clone(), arc.clone());
+                            (Some(arc), dur)
+                        } else {
+                            (None, 0.0)
+                        };
+
+                        let mut q = q_clone.lock().unwrap();
+                        q.set_chunk_ready_full(
+                            target.generation,
+                            target.is_next_page,
+                            target.chunk_index,
+                            arc_buf,
+                            Some(path_str),
+                            dur,
+                        );
+                        if let Ok(mut prod) = prod_clone.lock() {
+                            prod.push(TtsCoreEvent {
+                                event_type: TtsEventType::BufferUpdated as i32,
+                                generation: target.generation,
+                                chunk_index: target.chunk_index as u32,
+                                ..Default::default()
+                            });
                         }
+                        continue;
                     }
 
                     // Step C: Fetch from Network
+                    if target.text.trim().is_empty() {
+                        let mut q = q_clone.lock().unwrap();
+                        q.set_chunk_ready_full(
+                            target.generation,
+                            target.is_next_page,
+                            target.chunk_index,
+                            None,
+                            None,
+                            0.0,
+                        );
+                        continue;
+                    }
+
                     {
                         let mut q = q_clone.lock().unwrap();
                         q.set_chunk_fetching(
@@ -365,48 +414,48 @@ impl TtsCoreEngine {
                         Ok(audio_bytes) => {
                             let latency_ms = start_time.elapsed().as_millis() as i32;
                             // Save to disk cache
-                            let _ = c_clone.put_disk_bytes(&cache_key, &format, &audio_bytes);
+                            let saved_path_res = c_clone.put_disk_bytes(&cache_key, &format, &audio_bytes);
+                            let path_str = saved_path_res.ok().map(|p| p.to_string_lossy().to_string());
 
                             // Decode audio
-                            match AudioDecoder::decode_from_memory(audio_bytes, Some(&format)) {
+                            let (arc_buf, dur) = match AudioDecoder::decode_from_memory(audio_bytes, Some(&format)) {
                                 Ok(decoded) => {
-                                    let arc_buf = Arc::new(decoded);
-                                    c_clone.put_memory(cache_key, arc_buf.clone());
-
-                                    let mut q = q_clone.lock().unwrap();
-                                    q.set_chunk_ready(
-                                        target.generation,
-                                        target.is_next_page,
-                                        target.chunk_index,
-                                        arc_buf,
-                                    );
-
-                                    // Emit latency and buffer updated event
-                                    if let Ok(mut prod) = prod_clone.lock() {
-                                        prod.push(TtsCoreEvent {
-                                            event_type: TtsEventType::LatencyReport as i32,
-                                            generation: target.generation,
-                                            chunk_index: target.chunk_index as u32,
-                                            latency_ms,
-                                            ..Default::default()
-                                        });
-                                        prod.push(TtsCoreEvent {
-                                            event_type: TtsEventType::BufferUpdated as i32,
-                                            generation: target.generation,
-                                            chunk_index: target.chunk_index as u32,
-                                            ..Default::default()
-                                        });
-                                    }
+                                    let dur = decoded.duration_seconds;
+                                    let arc = Arc::new(decoded);
+                                    c_clone.put_memory(cache_key, arc.clone());
+                                    (Some(arc), dur)
                                 }
                                 Err(e) => {
-                                    log::error!("Audio decode failed: {:?}", e);
-                                    let mut q = q_clone.lock().unwrap();
-                                    q.set_chunk_failed(
-                                        target.generation,
-                                        target.is_next_page,
-                                        target.chunk_index,
-                                    );
+                                    log::warn!("Audio decode fallback for raw playback: {:?}", e);
+                                    (None, 0.0)
                                 }
+                            };
+
+                            let mut q = q_clone.lock().unwrap();
+                            q.set_chunk_ready_full(
+                                target.generation,
+                                target.is_next_page,
+                                target.chunk_index,
+                                arc_buf,
+                                path_str,
+                                dur,
+                            );
+
+                            // Emit latency and buffer updated event
+                            if let Ok(mut prod) = prod_clone.lock() {
+                                prod.push(TtsCoreEvent {
+                                    event_type: TtsEventType::LatencyReport as i32,
+                                    generation: target.generation,
+                                    chunk_index: target.chunk_index as u32,
+                                    latency_ms,
+                                    ..Default::default()
+                                });
+                                prod.push(TtsCoreEvent {
+                                    event_type: TtsEventType::BufferUpdated as i32,
+                                    generation: target.generation,
+                                    chunk_index: target.chunk_index as u32,
+                                    ..Default::default()
+                                });
                             }
                         }
                         Err(e) => {
@@ -787,6 +836,43 @@ pub unsafe extern "C" fn tts_core_slot_get_status(
         *out_status = q.get_slot_status(chunk_index as usize);
 
         TTS_OK
+    })
+}
+
+/// Queries the cached audio file path on disk for a given chunk index.
+///
+/// Returns TTS_OK (0) and writes null-terminated string to `out_path` if chunk is ready.
+/// Returns TTS_ERR_QUEUE_EMPTY (-6) if chunk is not ready or has no file path.
+/// Returns TTS_ERR_INVALID_ARG (-1) on null pointers or buffer overflow.
+///
+/// # Safety
+/// - `ctx` must be a valid non-null pointer returned by `tts_core_context_create`.
+/// - `out_path` must point to a writable buffer of at least `max_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn tts_core_slot_get_path(
+    ctx: *mut TtsCoreContext,
+    chunk_index: u32,
+    out_path: *mut c_char,
+    max_len: u32,
+) -> i32 {
+    catch_unwind_ffi!(TTS_ERR_PANIC, {
+        if ctx.is_null() || out_path.is_null() || max_len == 0 {
+            return TTS_ERR_INVALID_ARG;
+        }
+
+        let context = &mut *ctx;
+        let q = context.engine.prefetch_queue.lock().unwrap();
+        if let Some(path) = q.get_slot_path(chunk_index as usize) {
+            let bytes = path.as_bytes();
+            if bytes.len() >= max_len as usize {
+                return TTS_ERR_INVALID_ARG;
+            }
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_path as *mut u8, bytes.len());
+            *out_path.add(bytes.len()) = 0;
+            TTS_OK
+        } else {
+            TTS_ERR_QUEUE_EMPTY
+        }
     })
 }
 

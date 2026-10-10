@@ -32,8 +32,12 @@ function FfiLoader.getCandidatePaths(base_dir)
             table.insert(paths, base_dir .. "libs/armeabi-v7a/libtts_core.so")
             table.insert(paths, base_dir .. "libs/kindle-armhf/libtts_core.so")
             table.insert(paths, base_dir .. "libs/kobo-armv7l/libtts_core.so")
+        elseif arch_name == "x86" then
+            table.insert(paths, base_dir .. "libs/x86/libtts_core.so")
+            table.insert(paths, base_dir .. "libs/x86_64/libtts_core.so")
         else
             table.insert(paths, base_dir .. "libs/x86_64/libtts_core.so")
+            table.insert(paths, base_dir .. "libs/x86/libtts_core.so")
         end
         table.insert(paths, base_dir .. "rust_core/target/release/libtts_core.so")
         table.insert(paths, base_dir .. "rust_core/target/debug/libtts_core.so")
@@ -41,6 +45,25 @@ function FfiLoader.getCandidatePaths(base_dir)
     end
 
     return paths
+end
+
+--- Safely copies a binary file in chunks.
+local function copyFile(src, dst)
+    local fin = io.open(src, "rb")
+    if not fin then return false end
+    local fout = io.open(dst, "wb")
+    if not fout then
+        fin:close()
+        return false
+    end
+    while true do
+        local block = fin:read(65536)
+        if not block then break end
+        fout:write(block)
+    end
+    fin:close()
+    fout:close()
+    return true
 end
 
 --- Attempts to safely load the native library across candidate paths.
@@ -55,6 +78,32 @@ function FfiLoader.load(base_dir)
             return lib, path
         end
     end
+
+    -- Android Linker Namespace Workaround:
+    -- On Android 7.0+ (API 24+), dlopen() strictly restricts library namespaces to /data.
+    -- Plugins on /sdcard or /storage cannot be dlopened directly.
+    -- We copy the matching .so into KOReader's permitted /data app directory.
+    if ffi.os == "Linux" or ffi.os == "POSIX" or ffi.os == "Android" then
+        local android_staged_targets = {
+            "/data/data/org.koreader.launcher/files/cache/libtts_core.so",
+            "/data/data/org.koreader.launcher/files/libtts_core.so",
+        }
+        for _, path in ipairs(candidates) do
+            local fin = io.open(path, "rb")
+            if fin then
+                fin:close()
+                for _, target in ipairs(android_staged_targets) do
+                    if copyFile(path, target) then
+                        local ok, lib = pcall(ffi.load, target)
+                        if ok and lib then
+                            return lib, target
+                        end
+                    end
+                end
+            end
+        end
+    end
+
     return nil, nil
 end
 

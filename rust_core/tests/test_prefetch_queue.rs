@@ -125,3 +125,32 @@ fn test_slot_status_for_ui_rendering() {
     assert_eq!(status0_ready.is_fetching, 0);
     assert!((status0_ready.duration_seconds - 2.5).abs() < 1e-6);
 }
+
+#[test]
+fn test_sequential_single_preload_window() {
+    let mut queue = PrefetchQueue::new(1);
+    let sentences = (0..5).map(|i| format!("Câu {}.", i)).collect();
+    queue.load_page(1, sentences);
+
+    // Slot 0 (Urgent)
+    let target0 = queue.get_next_fetch_target().expect("Slot 0");
+    assert_eq!(target0.chunk_index, 0);
+    queue.set_chunk_ready(1, false, 0, make_dummy_audio(1.0));
+
+    // Slot 1 (Sequential preload)
+    let target1 = queue.get_next_fetch_target().expect("Slot 1");
+    assert_eq!(target1.chunk_index, 1);
+    queue.set_chunk_ready(1, false, 1, make_dummy_audio(1.0));
+
+    // With preload_count = 1, Slot 2 must NOT be fetched yet while playing Slot 0
+    assert!(
+        queue.get_next_fetch_target().is_none(),
+        "Queue should be saturated with single preload slot"
+    );
+
+    // Advance playing to Slot 1: now Slot 2 becomes target
+    assert_eq!(queue.advance_playing(), Some(1));
+    let target2 = queue.get_next_fetch_target().expect("Slot 2 after shift");
+    assert_eq!(target2.chunk_index, 2);
+}
+

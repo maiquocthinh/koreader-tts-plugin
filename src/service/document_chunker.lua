@@ -14,7 +14,7 @@ end
 local TextChunker = {}
 TextChunker.__index = TextChunker
 
-local DEFAULT_MIN_CHARS = 30
+local DEFAULT_MIN_CHARS = 120
 local DEFAULT_MAX_CHARS = 300
 
 --- Initialize TextChunker instance
@@ -22,8 +22,12 @@ local DEFAULT_MAX_CHARS = 300
 function TextChunker:new(options)
     local opts = options or {}
     local instance = setmetatable({}, self)
-    instance.min_chars = opts.min_chars or DEFAULT_MIN_CHARS
-    instance.max_chars = opts.max_chars or DEFAULT_MAX_CHARS
+    instance.min_chars = opts.min_chars
+        or (opts.settings and opts.settings:get("min_chunk_chars"))
+        or DEFAULT_MIN_CHARS
+    instance.max_chars = opts.max_chars
+        or (opts.settings and opts.settings:get("max_chunk_chars"))
+        or DEFAULT_MAX_CHARS
     instance.filter_footnotes = (opts.filter_footnotes ~= false)
     instance.custom_mappings = opts.custom_mappings or {}
     return instance
@@ -372,20 +376,23 @@ function TextChunker:extractRawPageText(document, page_num, ui)
         return nil, nil
     end
 
-    -- 1. Crengine on-screen text extraction (visible page in rolling mode)
+    local cur = (ui and type(ui.getCurrentPage) == "function" and ui:getCurrentPage())
+        or (ui and ui.paging and ui.paging.current_page)
+        or (document and type(document.getCurrentPage) == "function" and document:getCurrentPage())
+
     local is_current_page = true
-    if ui and type(ui.getCurrentPage) == "function" and page_num then
-        local cur = ui:getCurrentPage()
-        if cur and cur > 0 and cur ~= page_num then
-            is_current_page = false
-        end
+    if cur and cur > 0 and page_num and cur ~= page_num then
+        is_current_page = false
     end
 
-    if is_current_page and (ui and ui.rolling or (document.getTextFromPositions and (not ui or not ui.paging))) then
+    -- 1. Crengine on-screen text extraction (visible page in both paging and rolling modes)
+    if is_current_page and type(document.getTextFromPositions) == "function" then
         local ok_d, Device = pcall(require, "device")
-        local Screen = (ok_d and Device and Device.screen) or (ui and ui.screen)
-        local sw = (Screen and type(Screen.getWidth) == "function" and Screen:getWidth()) or 1280
-        local sh = (Screen and type(Screen.getHeight) == "function" and Screen:getHeight()) or 720
+        local Screen = (ok_d and Device and Device.screen) or (ui and ui.screen) or _G.Screen
+        local sw = (Screen and type(Screen.getWidth) == "function" and Screen:getWidth())
+            or (ui and ui.screen and ui.screen:getWidth()) or 1080
+        local sh = (Screen and type(Screen.getHeight) == "function" and Screen:getHeight())
+            or (ui and ui.screen and ui.screen:getHeight()) or 2400
         local ok, res = pcall(document.getTextFromPositions, document, {x = 0, y = 0}, {x = sw, y = sh}, true)
         if ok and res then
             local t, b = extractTextAndBoxes(res)
@@ -439,28 +446,7 @@ function TextChunker:extractRawPageText(document, page_num, ui)
         return text, word_boxes
     end
 
-    -- 4. Crengine peek next view in rolling mode if page_num != current_page
-    if not is_current_page and ui and ui.rolling and type(document.getCurrentPos) == "function" and type(document.gotoPos) == "function" and type(document.getTextFromPositions) == "function" then
-        local ok_d, Device = pcall(require, "device")
-        local Screen = (ok_d and Device and Device.screen) or (ui and ui.screen)
-        local sw = (Screen and type(Screen.getWidth) == "function" and Screen:getWidth()) or 1280
-        local sh = (Screen and type(Screen.getHeight) == "function" and Screen:getHeight()) or 720
-        local ok_peek, peek_res = pcall(function()
-            local saved_pos = document:getCurrentPos()
-            local next_pos = saved_pos + sh
-            document:gotoPos(next_pos)
-            local ok_res, res = pcall(document.getTextFromPositions, document, {x = 0, y = 0}, {x = sw, y = sh}, true)
-            document:gotoPos(saved_pos)
-            if ok_res and res then
-                return extractTextAndBoxes(res)
-            end
-        end)
-        if ok_peek and peek_res and #peek_res > 0 then
-            return peek_res, {}
-        end
-    end
-
-    -- 5. Try Crengine XPointer API: getPageXPointer & getTextFromXPointers
+    -- 4. Try Crengine XPointer API: getPageXPointer & getTextFromXPointers (exact page bounds)
     local ok_xp, res_xp = pcall(function()
         if type(document.getPageXPointer) == "function" and type(document.getTextFromXPointers) == "function" then
             local xp0 = document:getPageXPointer(page_num)
@@ -480,6 +466,30 @@ function TextChunker:extractRawPageText(document, page_num, ui)
         local t, b = extractTextAndBoxes(res_xp)
         if t and #t > 0 then
             return t, b or {}
+        end
+    end
+
+    -- 5. Crengine peek next view in rolling mode if page_num != current_page (fallback only)
+    if not is_current_page and ui and ui.rolling and type(document.getCurrentPos) == "function" and type(document.gotoPos) == "function" and type(document.getTextFromPositions) == "function" then
+        local ok_d, Device = pcall(require, "device")
+        local Screen = (ok_d and Device and Device.screen) or (ui and ui.screen) or _G.Screen
+        local sw = (Screen and type(Screen.getWidth) == "function" and Screen:getWidth())
+            or (ui and ui.screen and ui.screen:getWidth()) or 1080
+        local sh = (Screen and type(Screen.getHeight) == "function" and Screen:getHeight())
+            or (ui and ui.screen and ui.screen:getHeight()) or 2400
+        local cur = (ui and type(ui.getCurrentPage) == "function" and ui:getCurrentPage()) or page_num
+        local ok_peek, peek_res = pcall(function()
+            local saved_pos = document:getCurrentPos()
+            local next_pos = saved_pos + (page_num - cur) * sh
+            document:gotoPos(next_pos)
+            local ok_res, res = pcall(document.getTextFromPositions, document, {x = 0, y = 0}, {x = sw, y = sh}, true)
+            document:gotoPos(saved_pos)
+            if ok_res and res then
+                return extractTextAndBoxes(res)
+            end
+        end)
+        if ok_peek and peek_res and #peek_res > 0 then
+            return peek_res, {}
         end
     end
 
@@ -505,6 +515,12 @@ function TextChunker:extractRawPageText(document, page_num, ui)
         end)
     end
 
+    local ok_l, logger = pcall(require, "logger")
+    if ok_l and logger and logger.dbg then
+        logger.dbg(string.format("[TTS Chunker] target_page=%s, ui_cur=%s, is_curr=%s, len=%d, text=%s",
+            tostring(page_num), tostring(cur), tostring(is_current_page), #(text or ""), (text or ""):sub(1, 60):gsub("[\r\n]+", " ")))
+    end
+
     return text or "", word_boxes or {}
 end
 
@@ -525,7 +541,16 @@ local function mapSentenceToBBoxes(raw_sentence, full_text, word_boxes, search_o
         if first_words then
             s_start = full_text:find(first_words, search_offset, true)
             if s_start then
-                s_end = s_start + #raw_sentence - 1
+                local last_words = raw_sentence:match("([^%s]+%s+[^%s]+)%s*$")
+                if last_words then
+                    local _, l_end = full_text:find(last_words, s_start, true)
+                    if l_end then
+                        s_end = l_end
+                    end
+                end
+                if not s_end then
+                    s_end = s_start + #raw_sentence - 1
+                end
             end
         end
     end
@@ -560,6 +585,11 @@ end
 -- @return table Array of Chunk objects
 function TextChunker:extractPageChunks(document, page_num, ui)
     local raw_page_text, word_boxes = self:extractRawPageText(document, page_num, ui)
+    local ok_l, logger = pcall(require, "logger")
+    if ok_l and logger and logger.dbg then
+        logger.dbg(string.format("[TTS Chunker] page=%s, raw_len=%d, snippet=%s",
+            tostring(page_num), #(raw_page_text or ""), (raw_page_text or ""):sub(1, 80):gsub("[\r\n]+", " ")))
+    end
     if not raw_page_text or raw_page_text == "" then
         return {}
     end
@@ -574,25 +604,31 @@ function TextChunker:extractPageChunks(document, page_num, ui)
     local sentences = self:splitSentences(cleaned_text)
     local chunks = {}
     local offset = 1
+    local chunk_idx = 1
 
-    for idx, sentence in ipairs(sentences) do
+    for _, sentence in ipairs(sentences) do
         -- 3. Pronunciation dictionary normalization for TTS
         local tts_text = self:normalizePronunciation(sentence)
+        local trimmed = tts_text:gsub("^%s+", ""):gsub("%s+$", "")
 
-        -- 4. Bounding box mapping
-        local bboxes, new_offset = mapSentenceToBBoxes(sentence, raw_page_text, word_boxes, offset)
-        offset = new_offset
+        -- Filter out empty or whitespace-only chunks to prevent server HTTP 400 errors
+        if #trimmed > 0 and trimmed:match("%S") then
+            -- 4. Bounding box mapping
+            local bboxes, new_offset = mapSentenceToBBoxes(sentence, raw_page_text, word_boxes, offset)
+            offset = new_offset
 
-        table.insert(chunks, {
-            index       = idx,
-            page        = page_num,
-            text        = tts_text,       -- Text sent to TTS server (normalized)
-            raw_text    = sentence,       -- Original page text
-            start_pos   = offset,
-            end_pos     = offset + #sentence,
-            char_count  = #tts_text,
-            bboxes      = bboxes or {},   -- Highlighting bounding boxes
-        })
+            table.insert(chunks, {
+                index       = chunk_idx,
+                page        = page_num,
+                text        = trimmed,        -- Text sent to TTS server (normalized & trimmed)
+                raw_text    = sentence,       -- Original page text
+                start_pos   = offset,
+                end_pos     = offset + #sentence,
+                char_count  = #trimmed,
+                bboxes      = bboxes or {},   -- Highlighting bounding boxes
+            })
+            chunk_idx = chunk_idx + 1
+        end
     end
 
     return chunks

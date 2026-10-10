@@ -52,8 +52,13 @@ test-lua:
 
 install-adb: package
 	@echo "=== Installing Plugin to Android Device via ADB ==="
-	adb push dist/koreader_tts.koplugin /sdcard/koreader/plugins/
+	MSYS_NO_PATHCONV=1 adb push dist/koreader_tts.koplugin /sdcard/koreader/plugins/
 	@echo "[+] Installation complete. Restart KOReader to load updated plugin."
+
+FTP_HOST ?= 192.168.1.47
+FTP_PORT ?= 2121
+install-ftp: package
+	@python scripts/upload_ftp.py $(FTP_HOST) $(FTP_PORT)
 
 clean:
 	@echo "=== Cleaning build artifacts ==="

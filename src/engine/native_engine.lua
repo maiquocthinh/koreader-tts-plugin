@@ -47,7 +47,7 @@ function NativeEngine:new(options, lib, loaded_path)
     instance.speed = options.speed or 1.0
     instance.api_key = options.api_key or ""
     instance.cache_dir = options.cache_dir or "cache/tts"
-    instance.preload_count = options.preload_count or 3
+    instance.preload_count = options.preload_count or 1
 
     local config_table = {
         server_url = instance.server_url,
@@ -146,6 +146,19 @@ function NativeEngine:getSlotStatus(chunk_index)
     }
 end
 
+function NativeEngine:getSlotPath(chunk_index)
+    if self.ctx and self.lib then
+        local ok_fn, fn = pcall(function() return self.lib.tts_core_slot_get_path end)
+        if ok_fn and fn then
+            local buf = ffi.new("char[1024]")
+            if fn(self.ctx, chunk_index, buf, 1024) == 0 then
+                return ffi.string(buf)
+            end
+        end
+    end
+    return nil
+end
+
 function NativeEngine:updateConfig(new_options)
     new_options = new_options or {}
     if new_options.server_url then self.server_url = new_options.server_url end
@@ -169,6 +182,40 @@ function NativeEngine:updateConfig(new_options)
         return self.lib.tts_core_context_update_config(self.ctx, c_json) == 0
     end
     return true
+end
+
+function NativeEngine:synthesizeSingle(text, callback)
+    if not callback then return end
+    if not text or text == "" then
+        callback(false, "Văn bản rỗng")
+        return
+    end
+
+    -- Use isolated client so standalone snippet synthesis never corrupts or wipes the active book prefetch queue in self.ctx
+    if not self._single_client then
+        local ok_client, TTSClient = pcall(require, "src.bridge.fallback.tts_client")
+        if ok_client and TTSClient then
+            self._single_client = TTSClient:new{
+                server_url = self.server_url,
+                voice = self.voice,
+                audio_format = self.audio_format,
+                speed = self.speed,
+                api_key = self.api_key,
+                cache_dir = self.cache_dir,
+            }
+        end
+    end
+
+    if self._single_client then
+        self._single_client.server_url = self.server_url
+        self._single_client.voice = self.voice
+        self._single_client.audio_format = self.audio_format
+        self._single_client.speed = self.speed
+        self._single_client.api_key = self.api_key
+        self._single_client:fetchSpeechAsync(text, callback)
+    else
+        callback(false, "No synthesis client available")
+    end
 end
 
 function NativeEngine:destroy()

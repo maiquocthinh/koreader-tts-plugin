@@ -81,6 +81,20 @@ function ITtsEngine:getSlotStatus(chunk_index)
     error("ITtsEngine:getSlotStatus must be implemented by subclass")
 end
 
+--- Retrieves the cached audio file path for a ready chunk.
+-- @param chunk_index integer 0-based chunk index
+-- @return string|nil File path on disk, or nil if not ready
+function ITtsEngine:getSlotPath(chunk_index)
+    return nil
+end
+
+--- Synthesizes a single independent text snippet (used for sentence tests and selection reading).
+-- @param text string Sentence text to synthesize
+-- @param callback function(success, path_or_err)
+function ITtsEngine:synthesizeSingle(text, callback)
+    error("ITtsEngine:synthesizeSingle must be implemented by subclass")
+end
+
 --- Dynamically updates engine configuration (server_url, voice, format, speed, api_key).
 -- @param options Configuration options table
 -- @return boolean Success

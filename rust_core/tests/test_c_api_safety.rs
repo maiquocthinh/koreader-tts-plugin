@@ -169,6 +169,25 @@ fn test_context_lifecycle_and_null_safety() {
             TTS_ERR_INVALID_ARG
         );
 
+        // Slot path query safety
+        let mut path_buf = [0i8; 1024];
+        assert_eq!(
+            tts_core_slot_get_path(ctx, 0, path_buf.as_mut_ptr(), 1024),
+            TTS_ERR_QUEUE_EMPTY
+        );
+        assert_eq!(
+            tts_core_slot_get_path(ptr::null_mut(), 0, path_buf.as_mut_ptr(), 1024),
+            TTS_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            tts_core_slot_get_path(ctx, 0, ptr::null_mut(), 1024),
+            TTS_ERR_INVALID_ARG
+        );
+        assert_eq!(
+            tts_core_slot_get_path(ctx, 0, path_buf.as_mut_ptr(), 0),
+            TTS_ERR_INVALID_ARG
+        );
+
         // Event poll (stub returns 0 for empty)
         let mut event = TtsCoreEvent::default();
         assert_eq!(tts_core_event_poll(ctx, &mut event), 0);

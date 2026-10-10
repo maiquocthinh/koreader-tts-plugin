@@ -80,4 +80,11 @@ function FfiMarshaler.unpackSlotStatus(status)
     }
 end
 
+--- Allocates a writable char buffer for path retrieval.
+-- @param size Buffer size in bytes (default 1024)
+-- @return cdata char[size] buffer
+function FfiMarshaler.newPathBuffer(size)
+    return ffi.new("char[?]", size or 1024)
+end
+
 return FfiMarshaler

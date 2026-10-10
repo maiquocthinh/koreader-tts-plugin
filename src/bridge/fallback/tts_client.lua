@@ -131,6 +131,7 @@ function TTSClient:new(options)
     instance.timeout = options.request_timeout or 15
     instance.cache_dir = options.cache_dir or "cache/tts"
     instance._mock_transport = options._mock_transport -- Used for unit testing
+    instance._pooled_socket = nil                       -- HTTP/1.1 Persistent connection pool
 
     -- Ensure cache directory exists
     instance:_ensureCacheDir()
@@ -365,9 +366,10 @@ function TTSClient:fetchSpeechAsync(text, callback, opts)
     return cancel_handle
 end
 
---- Internal socket fetch implementation with coroutine non-blocking streaming
+--- Internal socket fetch implementation with HTTP/1.1 Persistent Connection pooling
 function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav_path, final_wav_path, format, callback, is_cancelled_fn)
     local socket = require("socket")
+    local endpoint_key = string.format("%s://%s:%d", url_info.scheme, url_info.host, url_info.port)
 
     local headers = {
         string.format("POST %s HTTP/1.1", url_info.path),
@@ -375,85 +377,154 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
         "Content-Type: application/json",
         string.format("Content-Length: %d", #payload),
         "User-Agent: KOReader-TTS/1.0",
-        "Connection: close",
+        "Connection: keep-alive",
     }
     if api_key and api_key ~= "" then
         table.insert(headers, string.format("Authorization: Bearer %s", api_key))
     end
     local request_header_str = table.concat(headers, "\r\n") .. "\r\n\r\n"
 
+    local this = self
     local co = coroutine.create(function()
-        local tcp = socket.tcp()
         local start_time = os.time()
 
-        -- DNS Caching: Cache resolved IP to eliminate repeated getaddrinfo blocking latency
-        TTSClient._dns_cache = TTSClient._dns_cache or {}
-        local target_host = url_info.host
-        local is_ip = target_host:match("^%d+%.%d+%.%d+%.%d+$")
-        local connect_host = target_host
-        if not is_ip then
-            if TTSClient._dns_cache[target_host] then
-                connect_host = TTSClient._dns_cache[target_host]
-            elseif socket.dns and socket.dns.toip then
-                local resolved = socket.dns.toip(target_host)
-                if resolved then
-                    TTSClient._dns_cache[target_host] = resolved
-                    connect_host = resolved
+        local function open_raw_connection()
+            local target_host = url_info.host
+            local is_ip = target_host:match("^%d+%.%d+%.%d+%.%d+$")
+            local connect_host = target_host
+            if not is_ip then
+                TTSClient._dns_cache = TTSClient._dns_cache or {}
+                if TTSClient._dns_cache[target_host] then
+                    connect_host = TTSClient._dns_cache[target_host]
+                elseif socket.dns and socket.dns.toip then
+                    local resolved = socket.dns.toip(target_host)
+                    if resolved then
+                        TTSClient._dns_cache[target_host] = resolved
+                        connect_host = resolved
+                    end
                 end
             end
+
+            local s = socket.tcp()
+            s:settimeout(0)
+            local conn_ok, conn_err = s:connect(connect_host, url_info.port)
+            if not conn_ok then
+                if conn_err == "timeout" or conn_err == "already in use" or conn_err == "Operation already in progress" then
+                    while true do
+                        if os.time() - start_time > timeout then
+                            s:close()
+                            return nil, "Hết thời gian kết nối TCP"
+                        end
+                        local _, can_write, _ = socket.select(nil, {s}, 0)
+                        if can_write and #can_write > 0 then
+                            break
+                        end
+                        coroutine.yield("connecting")
+                    end
+                else
+                    if TTSClient._dns_cache then TTSClient._dns_cache[target_host] = nil end
+                    s:close()
+                    return nil, "Lỗi kết nối tới " .. url_info.host .. ":" .. url_info.port .. " (" .. tostring(conn_err) .. ")"
+                end
+            end
+
+            if url_info.scheme == "https" then
+                local ok_ssl, ssl = pcall(require, "ssl")
+                if ok_ssl and ssl and ssl.wrap then
+                    local ssl_params = {
+                        mode = "client",
+                        protocol = "any",
+                        verify = "none",
+                        options = "all",
+                    }
+                    s = ssl.wrap(s, ssl_params)
+                    s:sni(url_info.host)
+                    s:settimeout(0)
+
+                    while true do
+                        local hs_ok, hs_err = s:dohandshake()
+                        if hs_ok then
+                            break
+                        elseif hs_err == "wantread" or hs_err == "wantwrite" or hs_err == "timeout" then
+                            if os.time() - start_time > timeout then
+                                s:close()
+                                return nil, "Hết thời gian bắt tay SSL"
+                            end
+                            coroutine.yield("handshake")
+                        else
+                            s:close()
+                            return nil, "Lỗi bắt tay SSL: " .. tostring(hs_err)
+                        end
+                    end
+                else
+                    s:close()
+                    return nil, "HTTPS yêu cầu thư viện LuaSec (ssl) nhưng không tìm thấy"
+                end
+            end
+
+            return s, nil
         end
 
-        -- Connect with a sensible timeout (2.5s) to avoid UI lockup
-        tcp:settimeout(math.min(timeout, 2.5))
-        local conn_ok, conn_err = tcp:connect(connect_host, url_info.port)
-        if not conn_ok then
-            if TTSClient._dns_cache then TTSClient._dns_cache[target_host] = nil end
-            tcp:close()
-            return false, "Lỗi kết nối tới " .. url_info.host .. ":" .. url_info.port .. " (" .. tostring(conn_err) .. ")"
-        end
-        tcp:settimeout(0) -- Switch to non-blocking mode for I/O
-
-        -- Wrap in SSL if HTTPS
-        if url_info.scheme == "https" then
-            local ok_ssl, ssl = pcall(require, "ssl")
-            if ok_ssl and ssl and ssl.wrap then
-                local ssl_params = {
-                    mode = "client",
-                    protocol = "any",
-                    verify = "none",
-                    options = "all",
-                }
-                tcp = ssl.wrap(tcp, ssl_params)
-                tcp:sni(url_info.host)
-                tcp:settimeout(math.min(timeout, 3.0))
-                local hs_ok, hs_err = tcp:dohandshake()
-                tcp:settimeout(0)
-                if not hs_ok then
-                    tcp:close()
-                    return false, "Lỗi bắt tay SSL: " .. tostring(hs_err)
+        -- Check connection pool for reusable keep-alive socket
+        local tcp = nil
+        local is_reused = false
+        if this._pooled_socket and this._pooled_socket.endpoint == endpoint_key then
+            local cand = this._pooled_socket.tcp
+            local age = os.time() - (this._pooled_socket.last_used or 0)
+            if cand and age < 60 then
+                local _, cand_err = cand:receive(0)
+                if cand_err == "closed" then
+                    pcall(function() cand:close() end)
+                    this._pooled_socket = nil
+                else
+                    tcp = cand
+                    is_reused = true
                 end
             else
-                tcp:close()
-                return false, "HTTPS yêu cầu thư viện LuaSec (ssl) nhưng không tìm thấy"
+                if cand then pcall(function() cand:close() end) end
+                this._pooled_socket = nil
             end
+        end
+
+        if not tcp then
+            local new_s, err = open_raw_connection()
+            if not new_s then
+                return false, err
+            end
+            tcp = new_s
+            is_reused = false
         end
 
         -- Send headers and payload
         local full_request = request_header_str .. payload
         local total_sent = 0
+        local send_retried = false
         while total_sent < #full_request do
             local sent, send_err, last_byte = tcp:send(full_request, total_sent + 1)
             if sent then
                 total_sent = sent
             elseif send_err == "timeout" or send_err == "wantwrite" or send_err == "wantread" then
                 total_sent = last_byte or total_sent
-                coroutine.yield()
+                coroutine.yield("sending")
             else
-                tcp:close()
-                return false, "Lỗi gửi dữ liệu HTTP: " .. tostring(send_err)
+                -- Reused keep-alive socket dropped by server idle timeout: reconnect once!
+                if is_reused and not send_retried and total_sent == 0 then
+                    pcall(function() tcp:close() end)
+                    this._pooled_socket = nil
+                    is_reused = false
+                    send_retried = true
+                    local new_s, err = open_raw_connection()
+                    if not new_s then return false, err end
+                    tcp = new_s
+                else
+                    pcall(function() tcp:close() end)
+                    this._pooled_socket = nil
+                    return false, "Lỗi gửi dữ liệu HTTP: " .. tostring(send_err)
+                end
             end
             if os.time() - start_time > timeout then
-                tcp:close()
+                pcall(function() tcp:close() end)
+                this._pooled_socket = nil
                 return false, "Hết thời gian gửi dữ liệu HTTP"
             end
         end
@@ -472,13 +543,15 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
                 if partial and partial ~= "" then
                     response_buffer = response_buffer .. partial
                 end
-                coroutine.yield()
+                coroutine.yield("awaiting_headers")
             else
-                tcp:close()
+                pcall(function() tcp:close() end)
+                this._pooled_socket = nil
                 return false, "Lỗi nhận phản hồi HTTP: " .. tostring(recv_err)
             end
             if os.time() - start_time > timeout then
-                tcp:close()
+                pcall(function() tcp:close() end)
+                this._pooled_socket = nil
                 return false, "Hết thời gian chờ nhận phản hồi từ server"
             end
         end
@@ -488,67 +561,174 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
         if not status_code or status_code < 200 or status_code >= 300 then
             local chunk, _, partial = tcp:receive("*a")
             local err_body = chunk or partial or ""
-            tcp:close()
+            pcall(function() tcp:close() end)
+            this._pooled_socket = nil
             if err_body:find("Unknown voice") or err_body:find("voice") then
                 return false, string.format("Lỗi giọng đọc: Máy chủ không hỗ trợ giọng này.\nChi tiết: %s\nVui lòng kiểm tra lại cấu hình giọng đọc trong Cài đặt.", err_body)
             end
             return false, string.format("Máy chủ TTS phản hồi lỗi HTTP %s: %s", tostring(status_code or "Unknown"), tostring(err_body))
         end
 
+        -- Parse HTTP version, Content-Length, Transfer-Encoding, and Connection header
+        local content_length = tonumber(response_buffer:match("[Cc]ontent%-[Ll]ength:%s*(%d+)"))
+        local transfer_encoding = response_buffer:match("[Tt]ransfer%-[Ee]ncoding:%s*([%a%-]+)")
+        local is_chunked = transfer_encoding and transfer_encoding:lower():find("chunked")
+        local conn_hdr = response_buffer:match("[Cc]onnection:%s*([%a%-]+)")
+        local is_http10 = response_buffer:find("HTTP/1%.0") ~= nil
+        local has_keepalive = conn_hdr and conn_hdr:lower():find("keep%-alive") ~= nil
+        local must_close = (conn_hdr and conn_hdr:lower():find("close") ~= nil) or (is_http10 and not has_keepalive)
+
         -- Read binary stream into file with batching to avoid coroutine thrashing
         local out_file, file_err = io.open(temp_wav_path, "wb")
         if not out_file then
-            tcp:close()
+            pcall(function() tcp:close() end)
+            this._pooled_socket = nil
             return false, "Không thể mở file tạm để ghi: " .. tostring(file_err)
         end
 
-        while true do
-            local bytes_in_tick = 0
-            local eof = false
-            local socket_err = nil
-
-            while bytes_in_tick < 65536 do
-                local chunk, recv_err, partial = tcp:receive(16384)
-                local data = chunk or partial
-                if data and #data > 0 then
-                    out_file:write(data)
-                    bytes_in_tick = bytes_in_tick + #data
+        local total_read = 0
+        if is_chunked then
+            -- RFC 7230 Chunked Transfer-Encoding Decoder (Streaming TTS support)
+            while true do
+                local size_line = nil
+                while not size_line do
+                    local line, recv_err = tcp:receive("*l")
+                    if line then
+                        if line ~= "" then size_line = line end
+                    elseif recv_err == "timeout" or recv_err == "wantread" then
+                        coroutine.yield("downloading")
+                    else
+                        out_file:close()
+                        os.remove(temp_wav_path)
+                        pcall(function() tcp:close() end)
+                        this._pooled_socket = nil
+                        return false, "Lỗi nhận kích thước chunk: " .. tostring(recv_err)
+                    end
+                    if os.time() - start_time > timeout then
+                        out_file:close()
+                        os.remove(temp_wav_path)
+                        pcall(function() tcp:close() end)
+                        this._pooled_socket = nil
+                        return false, "Hết thời gian chờ chunk"
+                    end
                 end
 
-                if chunk == nil and recv_err == "closed" then
-                    eof = true
-                    break
-                elseif chunk == nil and (recv_err == "timeout" or recv_err == "wantread") then
-                    break
-                elseif chunk == nil and (recv_err ~= "timeout" and recv_err ~= "wantread") then
-                    socket_err = recv_err
+                local chunk_size = tonumber(size_line:match("^(%x+)"), 16)
+                if not chunk_size or chunk_size == 0 then
+                    -- Chunk 0 signifies EOF of HTTP chunked stream
+                    tcp:receive("*l")
                     break
                 end
-            end
 
-            if eof then
-                break
-            end
+                local chunk_read = 0
+                while chunk_read < chunk_size do
+                    local needed = math.min(16384, chunk_size - chunk_read)
+                    local data, recv_err, partial = tcp:receive(needed)
+                    local chunk_data = data or partial
+                    if chunk_data and #chunk_data > 0 then
+                        out_file:write(chunk_data)
+                        chunk_read = chunk_read + #chunk_data
+                        total_read = total_read + #chunk_data
+                    end
+                    if chunk_read < chunk_size then
+                        if recv_err == "closed" then
+                            out_file:close()
+                            os.remove(temp_wav_path)
+                            pcall(function() tcp:close() end)
+                            this._pooled_socket = nil
+                            return false, "Mất kết nối giữa chừng khi đọc chunk"
+                        end
+                        coroutine.yield("downloading")
+                    end
+                    if os.time() - start_time > timeout then
+                        out_file:close()
+                        os.remove(temp_wav_path)
+                        pcall(function() tcp:close() end)
+                        this._pooled_socket = nil
+                        return false, "Hết thời gian tải chunk data"
+                    end
+                end
 
-            if socket_err then
-                out_file:close()
-                os.remove(temp_wav_path)
-                tcp:close()
-                return false, "Mất kết nối khi đang tải file âm thanh: " .. tostring(socket_err)
+                -- Consume trailing CRLF
+                tcp:receive("*l")
             end
+        else
+            -- Standard Content-Length or streaming until socket closed
+            while true do
+                local bytes_in_tick = 0
+                local eof = false
+                local socket_err = nil
 
-            if os.time() - start_time > timeout then
-                out_file:close()
-                os.remove(temp_wav_path)
-                tcp:close()
-                return false, "Hết thời gian tải file âm thanh"
+                while bytes_in_tick < 65536 do
+                    local to_read = 16384
+                    if content_length then
+                        to_read = math.min(16384, content_length - total_read)
+                        if to_read <= 0 then
+                            eof = true
+                            break
+                        end
+                    end
+
+                    local chunk, recv_err, partial = tcp:receive(to_read)
+                    local data = chunk or partial
+                    if data and #data > 0 then
+                        out_file:write(data)
+                        bytes_in_tick = bytes_in_tick + #data
+                        total_read = total_read + #data
+                        if content_length and total_read >= content_length then
+                            eof = true
+                            break
+                        end
+                    end
+
+                    if chunk == nil and recv_err == "closed" then
+                        eof = true
+                        break
+                    elseif chunk == nil and (recv_err == "timeout" or recv_err == "wantread") then
+                        break
+                    elseif chunk == nil and (recv_err ~= "timeout" and recv_err ~= "wantread") then
+                        socket_err = recv_err
+                        break
+                    end
+                end
+
+                if eof then
+                    break
+                end
+
+                if socket_err then
+                    out_file:close()
+                    os.remove(temp_wav_path)
+                    pcall(function() tcp:close() end)
+                    this._pooled_socket = nil
+                    return false, "Mất kết nối khi đang tải file âm thanh: " .. tostring(socket_err)
+                end
+
+                if os.time() - start_time > timeout then
+                    out_file:close()
+                    os.remove(temp_wav_path)
+                    pcall(function() tcp:close() end)
+                    this._pooled_socket = nil
+                    return false, "Hết thời gian tải file âm thanh"
+                end
+
+                coroutine.yield("downloading")
             end
-
-            coroutine.yield("downloading")
         end
 
         out_file:close()
-        tcp:close()
+
+        -- HTTP/1.1 Persistent Connection Reuse (Content-Length or Chunked completed)
+        if (content_length or is_chunked) and not must_close then
+            this._pooled_socket = {
+                tcp = tcp,
+                endpoint = endpoint_key,
+                last_used = os.time(),
+            }
+        else
+            pcall(function() tcp:close() end)
+            this._pooled_socket = nil
+        end
 
         -- Verify audio header based on format
         local verify_file = io.open(temp_wav_path, "rb")
@@ -582,9 +762,9 @@ function TTSClient:_fetchViaSocket(url_info, payload, api_key, timeout, temp_wav
         if coroutine.status(co) == "dead" then
             if callback then callback(status_tag, result_or_err) end
         else
-            -- Adaptive scheduling: 20ms during active download, 80ms while awaiting server synthesis
+            -- Adaptive scheduling: 20ms during active connect/handshake/send/download, 80ms while awaiting server synthesis
             -- This eliminates 75% of CPU timer wakeups on Android/E-ink devices, preventing UI lag.
-            local delay = (status_tag == "downloading") and 0.02 or 0.08
+            local delay = (status_tag == "downloading" or status_tag == "connecting" or status_tag == "handshake" or status_tag == "sending") and 0.02 or 0.08
             if UIManager and type(UIManager.scheduleIn) == "function" then
                 UIManager:scheduleIn(delay, pump)
             end
@@ -611,10 +791,11 @@ function TTSClient:_fetchViaCurl(server_url, payload, api_key, timeout, temp_wav
     --   -s: silent
     --   -k: insecure (skip CA cert verification for device environments)
     --   -L: follow HTTP redirects (301, 302, 307)
+    --   --http2: prefer HTTP/2 with transparent HTTP/1.1 fallback
     --   --data-binary: send exact UTF-8 payload with newlines preserved
     local effective_timeout = math.max(timeout or 15, 30)
     local curl_cmd = string.format(
-        'curl -s -k -L -X POST "%s" -H "Content-Type: application/json" -H "User-Agent: KOReader-TTS/1.0" %s --data-binary @"%s" -o "%s" --max-time %d >/dev/null 2>&1',
+        'curl -s -k -L --http2 -X POST "%s" -H "Content-Type: application/json" -H "User-Agent: KOReader-TTS/1.0" %s --data-binary @"%s" -o "%s" --max-time %d >/dev/null 2>&1',
         full_endpoint, auth_header, tmp_json, temp_wav_path, effective_timeout
     )
 

@@ -148,10 +148,15 @@ impl HttpClient {
         let client = Client::builder()
             .use_rustls_tls()
             .default_headers(default_headers)
+            .tcp_nodelay(true)
             .pool_max_idle_per_host(config.pool_max_idle_per_host)
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
             .tcp_keepalive(Some(Duration::from_secs(config.tcp_keepalive_secs)))
             .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
             .timeout(Duration::from_secs(config.timeout_secs))
+            .http2_adaptive_window(true)
+            .http2_keep_alive_interval(Some(Duration::from_secs(20)))
+            .http2_keep_alive_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| NetworkError::RequestBuild(e.to_string()))?;
 

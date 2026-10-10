@@ -245,6 +245,37 @@ function AndroidPlayer:play(path, seek_ms)
     seek_ms = math.floor(tonumber(seek_ms) or 0)
     self:_releasePlayer()
 
+    -- Ensure path is absolute for Android MediaPlayer JNI
+    if path and not path:match("^/") and not path:match("^%a:[/\\]") then
+        local ok_ds, DataStorage = pcall(require, "datastorage")
+        if ok_ds and DataStorage and type(DataStorage.getDataDir) == "function" then
+            local data_dir = DataStorage:getDataDir()
+            if data_dir and data_dir ~= "" then
+                local candidate = data_dir .. "/" .. path
+                local f = io.open(candidate, "rb")
+                if f then
+                    f:close()
+                    path = candidate
+                end
+            end
+        end
+        if not path:match("^/") and not path:match("^%a:[/\\]") then
+            local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+            if not ok_lfs or not lfs then ok_lfs, lfs = pcall(require, "lfs") end
+            if ok_lfs and lfs and type(lfs.currentdir) == "function" then
+                local cwd = lfs.currentdir()
+                if cwd and cwd ~= "" then
+                    local candidate = cwd .. "/" .. path
+                    local f = io.open(candidate, "rb")
+                    if f then
+                        f:close()
+                        path = candidate
+                    end
+                end
+            end
+        end
+    end
+
     local android = self._android
     local ok = false
     local duration_ms = 0

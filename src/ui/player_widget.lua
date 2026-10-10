@@ -319,7 +319,7 @@ function UIPlayer:showControlBar()
     self.play_pause_btn = Button:new{
         text = is_playing and "  ||  " or "  ▶  ",
         bordersize = Size.border.thin or 1,
-        padding = 6,
+        padding = 10,
         callback = function()
             this:onTogglePlayPause()
         end,
@@ -411,57 +411,67 @@ function UIPlayer:showControlBar()
         card,
     }
 
-    -- Direct hit-testing gesture handler: guarantees taps are intercepted reliably
+    -- Direct hit-testing gesture handler: guarantees taps are intercepted reliably with generous touch padding
     self.control_bar.handleEvent = function(cbar, event)
+        for i = #cbar, 1, -1 do
+            if cbar[i] and cbar[i].handleEvent and cbar[i]:handleEvent(event) then
+                return true
+            end
+        end
+
         local arg1 = event.args and event.args[1]
         local is_gesture = event.handler == "onGesture" or (type(arg1) == "table" and arg1.ges)
         if is_gesture then
             local ges = type(arg1) == "table" and arg1 or nil
-            if ges and ges.pos and ges.ges == "tap" then
+            if ges and ges.pos then
                 local pos = ges.pos
-                if this:_isTapOnWidget(pos, this.btn_close) then
-                    this:onClose()
-                    return true
+                if ges.ges == "tap" then
+                    -- Priority 1: Play/Pause button with 20px touch margin
+                    if this:_isTapOnWidget(pos, this.play_pause_btn, 20) then
+                        this:onTogglePlayPause()
+                        return true
+                    end
+                    if this:_isTapOnWidget(pos, this.btn_close, 16) then
+                        this:onClose()
+                        return true
+                    end
+                    if this:_isTapOnWidget(pos, this.btn_prev_chunk, 16) then
+                        this:onPrevChunk()
+                        return true
+                    end
+                    if this:_isTapOnWidget(pos, this.btn_next_chunk, 16) then
+                        this:onNextChunk()
+                        return true
+                    end
+                    if this:_isTapOnWidget(pos, this.btn_prev_page, 16) then
+                        this:onPrevPage()
+                        return true
+                    end
+                    if this:_isTapOnWidget(pos, this.btn_next_page, 16) then
+                        this:onNextPage()
+                        return true
+                    end
+                    if this:_isTapOnWidget(pos, this.speed_btn, 16) then
+                        this:showSpeedDialog()
+                        return true
+                    end
+                    if this:_isTapOnWidget(pos, this.sleep_timer_btn, 16) then
+                        this:showSleepTimerDialog()
+                        return true
+                    end
+                    if this:_isTapOnWidget(pos, this.btn_minimize, 16) then
+                        this:toggleMode()
+                        return true
+                    end
                 end
-                if this:_isTapOnWidget(pos, this.play_pause_btn) then
-                    this:onTogglePlayPause()
-                    return true
-                end
-                if this:_isTapOnWidget(pos, this.btn_prev_chunk) then
-                    this:onPrevChunk()
-                    return true
-                end
-                if this:_isTapOnWidget(pos, this.btn_next_chunk) then
-                    this:onNextChunk()
-                    return true
-                end
-                if this:_isTapOnWidget(pos, this.btn_prev_page) then
-                    this:onPrevPage()
-                    return true
-                end
-                if this:_isTapOnWidget(pos, this.btn_next_page) then
-                    this:onNextPage()
-                    return true
-                end
-                if this:_isTapOnWidget(pos, this.speed_btn) then
-                    this:showSpeedDialog()
-                    return true
-                end
-                if this:_isTapOnWidget(pos, this.sleep_timer_btn) then
-                    this:showSleepTimerDialog()
-                    return true
-                end
-                if this:_isTapOnWidget(pos, this.btn_minimize) then
-                    this:toggleMode()
-                    return true
-                end
-                -- Absorb any tap inside the player card frame so it never leaks to reader gestures
-                if this:_isTapOnWidget(pos, this.card_container) then
+
+                -- Absorb any tap or touch inside the player card frame so it never leaks to reader gestures
+                if this:_isTapOnWidget(pos, this.card_container, 0) then
                     return true
                 end
             end
         end
-        return BottomContainer.handleEvent(cbar, event)
+        return false
     end
 
     UIManager:show(self.control_bar)
@@ -469,11 +479,11 @@ function UIPlayer:showControlBar()
 end
 
 --- Hit test a screen position against a widget's rendered dimensions
-function UIPlayer:_isTapOnWidget(pos, widget)
+function UIPlayer:_isTapOnWidget(pos, widget, custom_pad)
     if not widget or not pos then return false end
     local d = widget.dimen or (widget[1] and widget[1].dimen)
     if not d or not d.x or not d.y or not d.w or not d.h then return false end
-    local pad = 12
+    local pad = custom_pad or 24
     return pos.x >= (d.x - pad) and pos.x <= (d.x + d.w + pad)
         and pos.y >= (d.y - pad) and pos.y <= (d.y + d.h + pad)
 end
@@ -583,24 +593,36 @@ function UIPlayer:showMiniBubble()
     }
 
     self.mini_bubble.handleEvent = function(mb, event)
+        for i = #mb, 1, -1 do
+            if mb[i] and mb[i].handleEvent and mb[i]:handleEvent(event) then
+                return true
+            end
+        end
+
         local arg1 = event.args and event.args[1]
         local is_gesture = event.handler == "onGesture" or (type(arg1) == "table" and arg1.ges)
         if is_gesture then
             local ges = type(arg1) == "table" and arg1 or nil
-            if ges and ges.pos and ges.ges == "tap" then
+            if ges and ges.pos then
                 local pos = ges.pos
-                if this:_isTapOnWidget(pos, this.mini_play_btn) then
-                    this:onTogglePlayPause()
-                    return true
+                if ges.ges == "tap" then
+                    if this:_isTapOnWidget(pos, this.mini_play_btn, 24) then
+                        this:onTogglePlayPause()
+                        return true
+                    end
+                    -- Tapping anywhere else on the mini bubble expands back to full control bar
+                    if this:_isTapOnWidget(pos, this.mini_card_container, 0) then
+                        this:toggleMode()
+                        return true
+                    end
                 end
-                -- Tapping anywhere else on the mini bubble expands back to full control bar
-                if this:_isTapOnWidget(pos, this.mini_card_container) then
-                    this:toggleMode()
+
+                if this:_isTapOnWidget(pos, this.mini_card_container, 0) then
                     return true
                 end
             end
         end
-        return BottomContainer.handleEvent(mb, event)
+        return false
     end
 
     UIManager:show(self.mini_bubble)
@@ -669,7 +691,7 @@ function UIPlayer:_updateBufferStatus()
         return
     end
 
-    local k = (self.settings and self.settings:get("preload_count")) or 2
+    local k = (self.settings and self.settings:get("preload_count")) or 1
     k = math.max(1, math.min(7, k))
 
     local ready_count = 0
@@ -771,10 +793,39 @@ end
 
 --- Toggle Play / Pause
 function UIPlayer:onTogglePlayPause()
-    if self.playback_queue then
-        self.playback_queue:togglePlayPause()
-        self:_updatePlayPauseIcon()
+    if not self.playback_queue then return end
+
+    local now = (UIManager.getTime and UIManager:getTime()) or os.time()
+    if self._last_toggle_time and (now - self._last_toggle_time) < 0.25 then
+        return
     end
+    self._last_toggle_time = now
+
+    local current_state = self.playback_queue:getState()
+
+    -- 1. If currently playing or prefetching: PAUSE IMMEDIATELY!
+    if current_state == "PLAYING" or current_state == "PREFETCHING" then
+        self.playback_queue:pause()
+        self:_updatePlayPauseIcon()
+        return
+    end
+
+    -- 2. If currently paused or idle: User taps Play
+    local on_screen_page = nil
+    if self.ui and type(self.ui.getCurrentPage) == "function" then
+        on_screen_page = self.ui:getCurrentPage()
+    elseif self.ui and self.ui.paging and self.ui.paging.current_page then
+        on_screen_page = self.ui.paging.current_page
+    end
+
+    local q_page = self.playback_queue:getCurrentPage()
+    if on_screen_page and on_screen_page > 0 and on_screen_page ~= q_page then
+        -- User moved to another page on reader while paused: read the visible page!
+        self.playback_queue:seekChunk(on_screen_page, 1)
+    else
+        self.playback_queue:resume()
+    end
+    self:_updatePlayPauseIcon()
 end
 
 --- Advance to next chunk

@@ -133,7 +133,7 @@ run_test("Acceptance: Text selection menu hook and independent snippet read", fu
     assert(#highlight_items == 1, "Must add 1 TTS button to text selection menu")
 
     local called_fetch = false
-    plugin.tts_client.fetchSpeechAsync = function(self, txt, cb)
+    plugin.engine.synthesizeSingle = function(self, txt, cb)
         called_fetch = true
         cb(true, "mock_selection.wav")
     end
@@ -152,9 +152,18 @@ run_test("Acceptance: Resume session from persisted book state", function()
     plugin.settings:set("last_page", 3)
     plugin.settings:set("last_chunk_index", 2)
 
-    plugin.playback_queue.tts_client = {
-        fetchSpeechAsync = function(self, txt, cb) cb(true, "mock.wav") return function() end end,
-        hasValidCache = function(self) return true, "mock.wav" end,
+    plugin.playback_queue.engine = {
+        isNative = function(self) return false end,
+        loadPage = function(self) return true end,
+        enqueueNextPage = function(self) return true end,
+        seekChunk = function(self) return true end,
+        play = function(self) return true end,
+        pause = function(self) return true end,
+        resume = function(self) return true end,
+        stop = function(self) return true end,
+        getSlotPath = function(self) return "mock.wav" end,
+        getSlotStatus = function(self, idx) return { chunk_index = idx, is_cached = true } end,
+        pollEvents = function(self, cb) end,
     }
     plugin.playback_queue.audio_backend = {
         play = function(self, path, cb)
